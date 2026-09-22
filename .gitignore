@@ -9,3 +9,4 @@ testes/package*.json
 testes/atende_puro.*
 testes/seguir_puro.*
 testes/emitidos_puro.*
+testes/qr.mjs

@@ -10,7 +10,8 @@ importar. Agora a lista mora num lugar só.
 
 | suite | o que cobre |
 |---|---|
-| `boleto_pdf` | ITF ida e volta, offsets do xref, `/Length`, acento Latin-1, escape |
+| `boleto_pdf` | ITF ida e volta, offsets do xref, `/Length`, acento Latin-1, escape, nenhum texto sobrepondo outro |
+| `qr` | o QR do PIX decodificado pelo **jsQR**, o vetor de ECC da norma, resistência a borrão |
 | `montar` | teto da lista (o caso das 352 duplicatas), saudação ("Olá, 001!") |
 | `boleto_mensagem` | as três situações do boleto: anexo / 2ª via / emitido no banco |
 | `assinatura` | rodapé em dado, campo vazio não impresso |
