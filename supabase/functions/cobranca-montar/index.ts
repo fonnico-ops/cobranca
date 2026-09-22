@@ -1,4 +1,4 @@
-// cobranca-montar (v4) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v5) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -13,6 +13,9 @@
 // discutindo o numero em vez do pagamento. O modelo e fixo; a variacao e a fase (vencido x a
 // vencer), o tamanho da lista e o que se pode dizer sobre o boleto.
 //
+// v5: o nome da empresa no CORPO vem de cobranca_config.empresa_nome, e e "Nitron". O texto
+//     dizia "aqui na Nitronplast" enquanto a assinatura dizia "Nitron" — duas marcas na
+//     mesma mensagem. A razao social do rodape continua sendo a juridica, que e outra coisa.
 // v4: ASSINATURA EM DADO, IGUAL NOS DOIS CANAIS. Era so "Nina — Nitronplast", o que serve no
 //     WhatsApp mas e fraco num e-mail de cobranca: sem razao social e CNPJ, um e-mail pedindo
 //     pagamento tem cara de golpe, justo quando o cliente vai pagar. Agora vem de
@@ -225,11 +228,11 @@ function sobreOsBoletos(ctx: any): string[] {
 }
 
 function textoVencido(ctx: any): string {
-  const { nome, titulos, total, maiorAtraso, comBoleto, semBoleto, multi, nomes, teto } = ctx;
+  const { nome, titulos, total, maiorAtraso, multi, nomes, teto, empresa } = ctx;
   const saud = `Olá, ${nome ? nome + "!" : "tudo bem?"}`;
   const abertura = maiorAtraso <= 7
-    ? `Passando para lembrar de ${titulos.length === 1 ? "um título que venceu" : "alguns títulos que venceram"} há poucos dias aqui na Nitronplast.`
-    : `Estou entrando em contato sobre ${titulos.length === 1 ? "um título em aberto" : "títulos em aberto"} aqui na Nitronplast.`;
+    ? `Passando para lembrar de ${titulos.length === 1 ? "um título que venceu" : "alguns títulos que venceram"} há poucos dias aqui na ${empresa}.`
+    : `Estou entrando em contato sobre ${titulos.length === 1 ? "um título em aberto" : "títulos em aberto"} aqui na ${empresa}.`;
   const partes = [
     saud, "",
     abertura, "",
@@ -245,10 +248,10 @@ function textoVencido(ctx: any): string {
 }
 
 function textoAVencer(ctx: any): string {
-  const { nome, titulos, total, comBoleto, semBoleto, multi, nomes, teto } = ctx;
+  const { nome, titulos, total, multi, nomes, teto, empresa } = ctx;
   const partes = [
     `Olá, ${nome ? nome + "!" : "tudo bem?"}`, "",
-    `Passando para avisar ${titulos.length === 1 ? "do título que vence" : "dos títulos que vencem"} na próxima semana aqui na Nitronplast — assim não pega ninguém de surpresa:`, "",
+    `Passando para avisar ${titulos.length === 1 ? "do título que vence" : "dos títulos que vencem"} na próxima semana aqui na ${empresa} — assim não pega ninguém de surpresa:`, "",
     linhasTitulos(titulos, multi, nomes, teto), "",
     `Total: *${brl(total)}*`, "",
   ];
@@ -310,6 +313,8 @@ Deno.serve(async (req) => {
     const REENVIO = Math.max(0, Number(cfg?.reenvio_min_dias ?? 5));
     const REMETENTE = String(cfg?.remetente || "Nina");
     const ASSINATURA = (cfg?.assinatura && typeof cfg.assinatura === "object") ? cfg.assinatura : {};
+    // a marca no corpo; a razao social do rodape e outra coisa, e mora em ASSINATURA
+    const EMPRESA_NOME = String(cfg?.empresa_nome || "").trim() || "Nitron";
 
     /* ---- titulos da fase ---- */
     const titulos: any[] = [];
@@ -385,6 +390,7 @@ Deno.serve(async (req) => {
         nome: saudacao, titulos: ordenados, total, maiorAtraso,
         comBoleto: boletos.length, semBoleto, semGeravel, semNoBanco,
         multi: codparcs.length > 1, nomes, remetente: REMETENTE, assinatura: ASSINATURA,
+        empresa: EMPRESA_NOME,
       };
       const escreve = (teto: number) => fase === "vencido"
         ? textoVencido({ ...base, teto })
@@ -393,8 +399,8 @@ Deno.serve(async (req) => {
       const mensagem = escreve(TETO_WPP).replace("\n" + MARCA_BOLETOS, "").replace(MARCA_RODAPE, "");
       const textoEmail = escreve(TETO_EMAIL);  // e-mail: cabe mais detalhe
       const assunto = fase === "vencido"
-        ? `Nitronplast — título${ordenados.length > 1 ? "s" : ""} em aberto (${brl(total)})`
-        : `Nitronplast — vencimento${ordenados.length > 1 ? "s" : ""} da próxima semana (${brl(total)})`;
+        ? `${EMPRESA_NOME} — título${ordenados.length > 1 ? "s" : ""} em aberto (${brl(total)})`
+        : `${EMPRESA_NOME} — vencimento${ordenados.length > 1 ? "s" : ""} da próxima semana (${brl(total)})`;
 
       cards.push({
         rodada, fase, grupo: Number(g), nome: nomes[String(ancora)] || null,
