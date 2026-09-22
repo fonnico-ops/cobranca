@@ -16,6 +16,9 @@ fs.writeFileSync('montar_puro.ts', s.slice(0, s.indexOf('Deno.serve(')).replace(
 '\nexport { linhasTitulos, primeiroNome, nomeGentil, textoVencido, textoAVencer, html, TETO_WPP, TETO_EMAIL };\n')"
 npx esbuild montar_puro.ts --format=esm --outfile=montar_puro.mjs
 node montar.teste.mjs
+
+# 3) as tres situacoes de boleto na mensagem (anexo / 2a via / emitido no banco)
+node boleto_mensagem.teste.mjs
 ```
 
 O que cada um cobre está em `docs/ARQUITETURA.md`, seções 3 e 4.
