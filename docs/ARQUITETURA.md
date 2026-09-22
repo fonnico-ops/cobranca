@@ -152,6 +152,46 @@ cai para o nome da empresa; sem ele, um cumprimento sem nome — melhor do que u
 
 ---
 
+## 4b. Só título que é boleto
+
+A v1 do snapshot pegava qualquer título a receber em aberto. Estava errado, e a gestão
+apontou: *"tem títulos que são depósitos, que acabam não gerando boleto. O ideal é rodar
+esses títulos que são boletos. Se não é boleto não roda."*
+
+Medido na janela de cobrança (até 180d, ≥ R$ 50):
+
+| | Títulos | Valor | Com boleto |
+|---|---|---|---|
+| `CODTIPTIT` 4 + 55 (boleto) | 1.065 | R$ 2,89M | 88% |
+| Todo o resto | 871 | R$ 5,54M | 3% |
+
+O "resto" não é dívida a cobrar por mensagem, e cobrar seria errado de formas concretas:
+depósito é o que o próprio cliente vai fazer; NF cancelada não existe mais; compensação e PDD
+são ajuste contábil; débito de funcionário nem é cliente. A baixa taxa de boleto nesses
+tipos (3%) é sintoma, não causa — eles nunca tiveram boleto porque nunca deveriam ter.
+
+Esse filtro também desfaz um número que eu tinha reportado antes de conhecê-lo: "37% dos
+vencidos têm boleto" era artefato de misturar tipos. Entre os títulos que **são** boleto, a
+cobertura é de 88%.
+
+### E o boleto que existe, mas não no ERP
+
+Dos que sobram sem boleto, a maioria **já tem um**, emitido direto no banco:
+
+- conta **113 (Grafeno)**, inteira — 73 títulos
+- conta **112 (Safra)**, negociados entre **06/10/2025 e 23/07/2026** — 28 títulos, que foram
+  os primeiros do Safra e saíram manualmente no banco
+
+Safra fora dessa janela, e os demais bancos, podem gerar normalmente.
+
+Isso muda duas coisas. A ação de gerar boleto **nunca** deve tocá-los (dois códigos de barras
+para a mesma dívida), e a mensagem não pode prometer 2ª via automática para eles — por isso
+`sobreOsBoletos()` tem três caminhos e não dois: anexo, "eu providencio", e "saiu pelo banco,
+o financeiro te manda".
+
+A regra vive em `cobranca_config.boleto_nao_geravel` porque tem prazo de validade: quando o
+período manual do Safra não tiver mais título em aberto, é um `UPDATE`.
+
 ## 5. O card é um retrato, e retrato envelhece
 
 Entre montar e aprovar, o cliente pode ter pago. No cron os dois passos correm seguidos e a
@@ -206,11 +246,15 @@ noite no Brasil — o aviso da semana sairia um dia antes, toda semana.
 
 ## 8. O que ficou de fora, e por quê
 
-**Os 63% de vencidos sem boleto no ERP.** Existe a ação `Gerar Boletos Não Gerados`
-(`nitron.boletosAtrasados.BaGerarBoletosNaoGerados`) no Sankhya, que registraria esses boletos
-no banco. Não foi acionada: é escrita no ERP com efeito bancário real e irreversível, e a
-decisão foi cobrar sem anexo oferecendo a 2ª via. Se um dia essa ação entrar na rotina, a
-cobertura de anexo sobe de 37% para perto de 100% sem mudar mais nada aqui.
+**Gerar os boletos que faltam.** Existe a ação `Gerar Boletos Não Gerados`
+(`nitron.boletosAtrasados.BaGerarBoletosNaoGerados`) no Sankhya. Depois do filtro por tipo e
+da regra de banco, ela valeria para apenas **15 títulos** — os outros 101 sem boleto já têm
+um, emitido direto no banco. Não foi acionada: é escrita no ERP com efeito bancário real.
+
+**Se um dia ela entrar na rotina, ela PRECISA respeitar `boleto_nao_geravel`.** Rodar a ação
+sem esse filtro geraria um segundo código de barras para 101 dívidas que já têm boleto na mão
+do cliente — o pior erro possível neste sistema. A coluna `cobranca_titulo.boleto_geravel` já
+marca cada título; a consulta é `where boleto_geravel = true`.
 
 **Títulos com mais de 180 dias de atraso.** Ficam fora por `atraso_max`. A carteira toda é de
 R$ 11,5M; dentro da janela de cobrança são R$ 3,4M. O resto é jurídico, e a campanha

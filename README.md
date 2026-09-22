@@ -71,29 +71,61 @@ pagar, âmbar quando é o cadastro geral, cinza quando só sobrou o CRM.
 
 ---
 
+## O que entra na cobrança
+
+**Só título que é boleto.** Isso é filtro, não detalhe: `CODTIPTIT` 4 (BOLETO) e 55 (BOLETO
+CLUBE NITRON), configurável em `cobranca_config.tipos_titulo`.
+
+Sem esse filtro, a cobrança alcançaria — medido em 22/09, na janela de cobrança — mais 871
+títulos e R$ 5,5M que **não se cobra por mensagem**:
+
+| Fora | Títulos | Valor | Por quê |
+|---|---|---|---|
+| Depósito / Depósito Antecipado | 367 | R$ 4,11M | é o cliente que deposita |
+| NEGOCIAÇÃO COMERCIAL | 167 | R$ 102k | acordo em andamento |
+| VENDA CLUBE NITRON | 144 | R$ 550k | o boleto do clube é o tipo 55 |
+| NF Cancelada/Devolvida | 108 | R$ 156k | a nota não existe mais |
+| COMPENSAÇÃO DÉBITO/CRÉDITO | 13 | R$ 477k | ajuste contábil |
+| PDD, débito de funcionário, cheque devolvido, cartão, PIX | ~70 | — | não é dívida de cliente |
+
+**PROTESTADO (30) e Cartório (38)** são boleto, mas já estão em via jurídica — cobrança
+amigável ali é incoerente. Ficam de fora; a campanha `cobranca_juridico` do catálogo trata.
+
 ## O boleto
 
 O Sankhya **não guarda o PDF do boleto** em lugar nenhum — conferido em `TGFFIN`,
-`AD_BOLHYAK` e `TGFHBA`: nenhuma URL, nenhum blob. Ele imprime na hora, por relatório.
+`AD_BOLHYAK` e `TGFHBA`. O que o ERP tem é `LINHADIGITAVEL` e `CODIGOBARRA` de 44 dígitos.
+O `boleto_pdf.ts` desenha a ficha a partir deles, sem dependência e **sem calcular nenhum
+dígito**. Se a linha digitável não existe, recusa emitir.
 
-O que o ERP tem é o que importa: `LINHADIGITAVEL` e `CODIGOBARRA` de 44 dígitos, já
-calculados e registrados no banco. Então o `boleto_pdf.ts` desenha a ficha de compensação
-a partir desses dois campos, sem dependência nenhuma e **sem calcular nenhum dígito** —
-nem DV, nem fator de vencimento, nem campo livre. Se a linha digitável não existe, a
-função se recusa a emitir.
+**Cobertura real (22/09), só nos títulos que são boleto:**
 
-**Cobertura real (22/09):**
+| | títulos | com boleto no ERP |
+|---|---|---|
+| Vencidos | 546 | 507 (93%) |
+| A vencer em 7 dias | 507 | 430 (85%) |
 
-| | títulos | com boleto no ERP | sem boleto |
+Dos 116 sem boleto:
+
+- **15 dá para gerar** — a mensagem oferece a 2ª via.
+- **101 já têm boleto, emitido direto no banco**, fora do ERP. A mensagem **não promete 2ª
+  via automática** para esses: diz que o boleto saiu pelo banco e encaminha ao financeiro.
+
+### Quais não podem ganhar boleto novo
+
+Gerar um segundo boleto para uma dívida que já tem um cria dois códigos de barras: o cliente
+paga o antigo e a baixa nunca fecha, ou paga os dois. A regra mora em
+`cobranca_config.boleto_nao_geravel`, como dado:
+
+| Conta | Janela | Títulos | Motivo |
 |---|---|---|---|
-| Vencidos | 2.741 | 1.014 (37%) | 1.727 |
-| A vencer em 7 dias | 551 | 438 (79%) | 113 |
+| 113 GRAFENO DIGITAL | toda | 73 | boleto emitido direto no banco |
+| 112 MATRIZ SAFRA 2 | DTNEG 06/10/2025 – 23/07/2026 | 28 | os primeiros do Safra saíram manualmente |
 
-Os 63% de vencidos sem boleto **são cobrados assim mesmo**, com valor, NF e vencimento no
-texto, e a mensagem oferece a 2ª via — foi a decisão tomada. A mensagem sempre diz o que
-está anexo e sempre diz quando falta algo; ela nunca promete um boleto que não vai junto.
+Safra **fora** dessa janela e os demais bancos (Itaú, conta 4) podem gerar normalmente.
 
----
+A regra é dado e não código porque tem prazo: quando o período manual do Safra não tiver
+mais título em aberto, é um `UPDATE`, não um deploy.
 
 ## Ligar o motor
 
@@ -143,6 +175,8 @@ POST /functions/v1/campanha-dono   { "acao": "devolver", "campanha": "cobranca" 
 | `reenvio_min_dias` | `5` | não repete o mesmo grupo antes disso |
 | `cap_grupos_run` | `40` | teto de grupos por rodada |
 | `empresas` | `{1,2,14}` | empresas do Sankhya |
+| `tipos_titulo` | `{4,55}` | CODTIPTIT que é boleto. Fora daqui não se cobra |
+| `boleto_nao_geravel` | Grafeno + Safra | contas/janelas cujo boleto saiu direto no banco |
 
 ---
 
@@ -175,7 +209,9 @@ contando de 1 em 1.
 ```
 sql/001_cobranca_schema.sql              as quatro tabelas
 sql/002_cobranca_ajustes.sql             bucket dos boletos e a coluna `envios`
-sql/003_cron.sql                         a cadencia no pg_cron
+sql/003_cron.sql                         a cadência no pg_cron
+sql/004_tipo_titulo.sql                  só título que é boleto
+sql/005_boleto_geravel.sql               quais não podem ganhar boleto novo
 supabase/functions/
   cobranca-titulos-refresh/index.ts      Sankhya → cobranca_titulo + cobranca_contato
   cobranca-boleto/index.ts               orquestra a renderização e o upload

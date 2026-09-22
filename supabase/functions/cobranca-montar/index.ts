@@ -121,6 +121,46 @@ function linhasTitulos(titulos: any[], comNomeLoja: boolean, nomes: Record<strin
 const TETO_WPP = 12;
 const TETO_EMAIL = 40;
 
+/**
+ * O que dizer sobre o boleto. Tres situacoes, nao duas.
+ *
+ * A terceira so apareceu quando a gestao explicou, em 22/09, por que alguns titulos estao
+ * sem boleto no Sankhya: o boleto FOI emitido, direto no banco, fora do ERP (a conta 113 do
+ * Grafeno inteira, e os primeiros do Safra na conta 112). O cliente ja tem esse boleto.
+ *
+ * Isso muda o que se promete. Dizer "eu providencio a 2a via" para esses seria prometer o
+ * que o sistema nao consegue fazer — e gerar um boleto novo criaria um segundo codigo de
+ * barras para a mesma divida. Entao a mensagem reconhece que o boleto existe e encaminha
+ * para quem consegue tira-lo no banco, em vez de prometer automatico.
+ */
+function sobreOsBoletos(ctx: any): string[] {
+  const { comBoleto, semBoleto, semGeravel, semNoBanco } = ctx;
+  const out: string[] = [];
+
+  if (comBoleto) {
+    out.push(semBoleto
+      ? `Seguem em anexo ${comBoleto === 1 ? "o boleto" : "os " + comBoleto + " boletos"} que tenho aqui.`
+      : `Segue ${comBoleto === 1 ? "o boleto" : "os boletos"} em anexo para pagamento.`);
+  }
+
+  if (semGeravel) {
+    out.push(comBoleto
+      ? `${semGeravel === 1 ? "Falta 1 título" : `Faltam ${semGeravel} títulos`} — me avise e eu providencio a 2ª via.`
+      : "Se quiser, eu providencio a 2ª via do boleto ou o Pix — só responder aqui.");
+  }
+
+  if (semNoBanco) {
+    // "foi emitido pelo banco" e verdade e e o que o cliente precisa saber para achar o
+    // boleto que ja tem. Nao promete 2a via automatica: essa passa pelo financeiro.
+    out.push(semNoBanco === 1
+      ? "Um dos títulos teve o boleto emitido direto pelo banco, então ele não sai por aqui — se não encontrar, me avise que o financeiro te manda a 2ª via."
+      : `${semNoBanco} desses títulos tiveram o boleto emitido direto pelo banco, então não saem por aqui — se não encontrar, me avise que o financeiro te manda as 2ª vias.`);
+  }
+
+  if (!out.length) out.push("Se precisar do boleto ou do Pix, é só me pedir aqui.");
+  return out;
+}
+
 function textoVencido(ctx: any): string {
   const { nome, titulos, total, maiorAtraso, comBoleto, semBoleto, multi, nomes, remetente, teto } = ctx;
   const saud = `Olá, ${nome ? nome + "!" : "tudo bem?"}`;
@@ -135,9 +175,7 @@ function textoVencido(ctx: any): string {
   ];
   if (multi) partes.push(`(títulos de ${new Set(titulos.map((t: any) => t.codparc)).size} lojas do grupo, reunidos numa mensagem só)`);
   partes.push("");
-  if (comBoleto && !semBoleto) partes.push(`Segue ${comBoleto === 1 ? "o boleto" : "os boletos"} em anexo para pagamento.`);
-  else if (comBoleto && semBoleto) partes.push(`Vai ${comBoleto === 1 ? "o boleto" : "os boletos"} que consegui emitir agora em anexo. ${semBoleto === 1 ? "Falta 1 título" : `Faltam ${semBoleto} títulos`}, que preciso pedir a 2ª via ao banco — me avise e eu providencio.`);
-  else partes.push("Se quiser, eu providencio a 2ª via do boleto ou o Pix — só responder aqui.");
+  partes.push(...sobreOsBoletos(ctx));
   partes.push("", "Se já tiver pago, por favor me mande o comprovante que eu dou baixa. E se precisar de prazo ou de parcelar, me diga que eu levo ao financeiro.", "", `Obrigada!\n${remetente} — Nitronplast`);
   return partes.filter((p) => p !== null && p !== undefined).join("\n");
 }
@@ -150,9 +188,7 @@ function textoAVencer(ctx: any): string {
     linhasTitulos(titulos, multi, nomes, teto), "",
     `Total: *${brl(total)}*`, "",
   ];
-  if (comBoleto && !semBoleto) partes.push(`${comBoleto === 1 ? "O boleto está" : "Os boletos estão"} em anexo, já para programar o pagamento.`);
-  else if (comBoleto) partes.push(`Anexei ${comBoleto === 1 ? "o boleto disponível" : "os boletos disponíveis"}. ${semBoleto === 1 ? "Um título ainda" : `${semBoleto} títulos ainda`} está sem boleto emitido — me avise se precisar antes do vencimento.`);
-  else partes.push("Se precisar do boleto ou do Pix antes do vencimento, é só me pedir aqui.");
+  partes.push(...sobreOsBoletos(ctx));
   partes.push("", `Qualquer coisa, estou por aqui.\n${remetente} — Nitronplast`);
   return partes.join("\n");
 }
@@ -239,6 +275,10 @@ Deno.serve(async (req) => {
       const codparcs = [...new Set(ordenados.map((t) => t.codparc))];
       const boletos = ordenados.filter((t) => t.boleto_url).map((t) => ({ nufin: t.nufin, url: t.boleto_url, dtvenc: t.dtvenc, valor: Number(t.valor) }));
       const semBoleto = ordenados.length - boletos.length;
+      // dos que estao sem boleto: quantos dao para providenciar e quantos ja existem no banco
+      const faltantes = ordenados.filter((t) => !t.boleto_url);
+      const semNoBanco = faltantes.filter((t) => t.boleto_geravel === false).length;
+      const semGeravel = faltantes.length - semNoBanco;
 
       // contatos do grupo: comeca pela ancora (a matriz, ou quem deve mais) e desce
       const ancora = codparcs.find((c) => String(c) === g) ?? codparcs[0];
@@ -262,7 +302,8 @@ Deno.serve(async (req) => {
       const saudacao = nomePessoa || (/^\p{L}/u.test(nomeEmpresa) ? nomeEmpresa : "");
       const base = {
         nome: saudacao, titulos: ordenados, total, maiorAtraso,
-        comBoleto: boletos.length, semBoleto, multi: codparcs.length > 1, nomes, remetente: REMETENTE,
+        comBoleto: boletos.length, semBoleto, semGeravel, semNoBanco,
+        multi: codparcs.length > 1, nomes, remetente: REMETENTE,
       };
       const escreve = (teto: number) => fase === "vencido"
         ? textoVencido({ ...base, teto })
@@ -277,7 +318,7 @@ Deno.serve(async (req) => {
         rodada, fase, grupo: Number(g), nome: nomes[String(ancora)] || null,
         codparcs, nufins: ordenados.map((t) => t.nufin),
         n_titulos: ordenados.length, valor: Math.round(total * 100) / 100, maior_atraso: maiorAtraso,
-        boletos, sem_boleto: semBoleto,
+        boletos, sem_boleto: semBoleto, sem_boleto_no_banco: semNoBanco,
         contatos, origem_contato: contatos[0]?.origem || null,
         mensagem, assunto, corpo_email: html(textoEmail, boletos),
         status: contatos.length ? "aguardando" : "sem_contato",
@@ -320,6 +361,7 @@ Deno.serve(async (req) => {
       valor: Math.round(gravar.reduce((a, c) => a + c.valor, 0)),
       com_boleto: gravar.filter((c) => c.boletos.length).length,
       sem_boleto_algum: gravar.filter((c) => c.sem_boleto > 0).length,
+      com_boleto_so_no_banco: gravar.filter((c) => c.sem_boleto_no_banco > 0).length,
       sem_contato: gravar.filter((c) => c.status === "sem_contato").length,
       pulados,
       auto_aprovar: cfg?.auto_aprovar === true,

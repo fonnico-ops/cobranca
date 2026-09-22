@@ -83,9 +83,10 @@ const dataIso = (x: any) => {
 };
 
 /* ------------------------------------------------------------------------ SQL */
-const SQL_TITULOS = (emp: string, dias: number, atrasoMax: number, off: number) => `
+const SQL_TITULOS = (emp: string, tipos: string, dias: number, atrasoMax: number, off: number) => `
 SELECT NUFIN, CODPARC, MATRIZ, CODEMP, NUMNOTA, DTVENC, DIAS, VLR, NOSSONUM, CODBCO, NOMEBCO,
-       CARTEIRA, CODAGE, CODCTABCO, LINHADIG, CODBARRA, PIXQR, CEDENTE, CEDCNPJ, SACADO, SACCNPJ
+       CARTEIRA, CODAGE, CODCTABCO, LINHADIG, CODBARRA, PIXQR, CEDENTE, CEDCNPJ, SACADO, SACCNPJ,
+       CODTIPTIT, DESCTIPTIT, DTNEG, CODCTABCOINT, CONTADESC
 FROM (
   SELECT f.NUFIN NUFIN, f.CODPARC CODPARC, NVL(p.CODPARCMATRIZ,0) MATRIZ, f.CODEMP CODEMP,
          f.NUMNOTA NUMNOTA, TO_CHAR(f.DTVENC,'YYYY-MM-DD') DTVENC,
@@ -93,14 +94,21 @@ FROM (
          f.NOSSONUM NOSSONUM, f.CODBCO CODBCO, b.NOMEBCO NOMEBCO,
          c.CARTEIRA CARTEIRA, c.CODAGE CODAGE, c.CODCTABCO CODCTABCO,
          f.LINHADIGITAVEL LINHADIG, f.CODIGOBARRA CODBARRA, f.AD_PIXQRCODE PIXQR,
-         e.RAZAOSOCIAL CEDENTE, e.CGC CEDCNPJ, p.NOMEPARC SACADO, p.CGC_CPF SACCNPJ
+         e.RAZAOSOCIAL CEDENTE, e.CGC CEDCNPJ, p.NOMEPARC SACADO, p.CGC_CPF SACCNPJ,
+         f.CODTIPTIT CODTIPTIT, tt.DESCRTIPTIT DESCTIPTIT,
+         TO_CHAR(f.DTNEG,'YYYY-MM-DD') DTNEG, f.CODCTABCOINT CODCTABCOINT, c.DESCRICAO CONTADESC
   FROM TGFFIN f
   JOIN TGFPAR p ON p.CODPARC = f.CODPARC AND p.TIPPESSOA = 'J'
   LEFT JOIN TSIEMP e ON e.CODEMP = f.CODEMP
   LEFT JOIN TSIBCO b ON b.CODBCO = f.CODBCO
   LEFT JOIN TSICTA c ON c.CODCTABCOINT = f.CODCTABCOINT
+  LEFT JOIN TGFTIT tt ON tt.CODTIPTIT = f.CODTIPTIT
   WHERE f.RECDESP = 1 AND f.DHBAIXA IS NULL AND f.PROVISAO = 'N'
     AND f.CODEMP IN (${emp})
+    -- SO TITULO QUE E BOLETO. Sem esta linha a cobranca alcancava deposito, NF cancelada,
+    -- compensacao contabil, PDD e debito de funcionario: 871 titulos e R$ 5,5M que nao se
+    -- cobra por mensagem. Ver o comentario de cobranca_config.tipos_titulo.
+    AND f.CODTIPTIT IN (${tipos})
     AND f.DTVENC < TRUNC(SYSDATE) + ${dias + 1}
     AND TRUNC(SYSDATE) - TRUNC(f.DTVENC) <= ${atrasoMax}
     -- intra-grupo fora: cobrar a propria holding por CNPJ que e nosso nao e cobranca
@@ -120,6 +128,36 @@ const SQL_PARCEIROS = (parcs: string) => `
 SELECT p.CODPARC, p.NOMEPARC, p.EMAIL, p.EMAILNFE, p.TELEFONE, p.AD_TELEFONE
 FROM TGFPAR p WHERE p.CODPARC IN (${parcs})`;
 
+/**
+ * O titulo sem boleto no ERP pode ganhar um?
+ *
+ * Nem sempre. Ha titulos cujo boleto foi emitido DIRETO NO BANCO, fora do Sankhya: o
+ * cliente ja tem um boleto valido na mao. Gerar outro criaria um segundo codigo de barras
+ * para a mesma divida — o cliente pagaria o antigo e a baixa nunca fecharia, ou pagaria os
+ * dois. Levantado com a gestao em 22/09: a conta 113 (Grafeno) inteira, e a conta 112
+ * (Safra) nos titulos negociados entre 06/10/2025 e 23/07/2026, que foram os primeiros e
+ * sairam manualmente no banco.
+ *
+ * A regra vem de cobranca_config.boleto_nao_geravel, nao daqui: ela tem prazo de validade.
+ * Quando o periodo manual do Safra nao tiver mais titulo em aberto, e um UPDATE.
+ */
+function avaliarGeravel(t: any, regras: any[]): { geravel: boolean; motivo: string | null } {
+  for (const r of (Array.isArray(regras) ? regras : [])) {
+    if (Number(r?.conta) !== Number(t.codctabcoint)) continue;
+    // sem janela de data, a conta inteira esta fora
+    const de = r?.dtneg_de ? String(r.dtneg_de) : null;
+    const ate = r?.dtneg_ate ? String(r.dtneg_ate) : null;
+    if (de || ate) {
+      const d = t.dtneg;
+      if (!d) continue;                        // sem DTNEG nao da para afirmar que casa
+      if (de && d < de) continue;
+      if (ate && d > ate) continue;
+    }
+    return { geravel: false, motivo: String(r?.motivo || "boleto emitido fora do ERP") };
+  }
+  return { geravel: true, motivo: null };
+}
+
 /* ----------------------------------------------------------------------- main */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -129,6 +167,9 @@ Deno.serve(async (req) => {
     const DIAS = Math.max(1, Number(cfg?.dias_a_vencer ?? 7));
     const ATRASO_MAX = Math.max(1, Number(cfg?.atraso_max ?? 180));
     const EMPRESAS = (cfg?.empresas?.length ? cfg.empresas : [1, 2, 14]).map((x: any) => Number(x) || 0).filter(Boolean);
+    const TIPOS = (cfg?.tipos_titulo?.length ? cfg.tipos_titulo : [4, 55]).map((x: any) => Number(x) || 0).filter(Boolean);
+    if (!TIPOS.length) throw new Error("cobranca_config.tipos_titulo vazio \u2014 sem tipo de titulo nao ha o que cobrar");
+    const REGRAS_BOLETO = Array.isArray(cfg?.boleto_nao_geravel) ? cfg.boleto_nao_geravel : [];
 
     const base = (Deno.env.get("SANKHYA_URL") || "").replace(/\/$/, "");
     const sess = await login(base, Deno.env.get("SANKHYA_USER")!, Deno.env.get("SANKHYA_PASS")!);
@@ -136,7 +177,7 @@ Deno.serve(async (req) => {
     /* ---- 1. titulos ---- */
     const titulos: any[] = [];
     for (let off = 0; off < 100000; off += 2000) {
-      const rows = await query(base, sess, SQL_TITULOS(EMPRESAS.join(","), DIAS, ATRASO_MAX, off));
+      const rows = await query(base, sess, SQL_TITULOS(EMPRESAS.join(","), TIPOS.join(","), DIAS, ATRASO_MAX, off));
       for (const r of rows) {
         const dtvenc = dataIso(r[5]);
         if (!dtvenc) continue;                        // sem vencimento nao se cobra nada
@@ -151,6 +192,8 @@ Deno.serve(async (req) => {
           linha_digitavel: S(r[14]), codigo_barras: digitos(r[15]) || null, pix: S(r[16]),
           cedente: S(r[17]), cedente_cnpj: digitos(r[18]) || null,
           sacado: S(r[19]), sacado_cnpj: digitos(r[20]) || null,
+          codtiptit: N(r[21]) || null, tipo_titulo: S(r[22]),
+          dtneg: dataIso(r[23]), codctabcoint: N(r[24]) || null, conta_desc: S(r[25]),
           atualizado: new Date().toISOString(),
         });
       }
@@ -253,6 +296,7 @@ Deno.serve(async (req) => {
 
     return j({
       ok: true,
+      tipos_titulo: TIPOS,
       titulos: titulos.length,
       parceiros: parcs.length,
       vencido: { titulos: vencidos.length, valor: Math.round(vencidos.reduce((a, b) => a + b.valor, 0)), com_boleto: comBoleto(vencidos), sem_boleto: vencidos.length - comBoleto(vencidos) },
