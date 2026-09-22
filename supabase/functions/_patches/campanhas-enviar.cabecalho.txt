@@ -1,0 +1,21 @@
+// v41: ANEXO DE VERDADE (`anexos`) E COBRANCA PELA NINA (`forcar_dono`). Duas adicoes do
+//      motor de cobranca. Nenhum campo existente mudou: chamada que nao passa os novos se
+//      comporta exatamente como na v40.
+//      1. `anexos` x `imagens`. A v30 mandou imagem pelo `imagens`, que no Zaptos vira
+//         `attachments` e no e-mail vira <img> no corpo (montado la no fila-processar). Um
+//         boleto em PDF por esse caminho apareceria como imagem quebrada no e-mail. Entao
+//         `anexos` e um campo proprio: no WhatsApp entra no mesmo `attachments` (o Zaptos
+//         nao distingue, e nao ha por que inventar diferenca), e no e-mail entra como
+//         `attachments` do POST — que e onde o GHL espera anexo de e-mail.
+//         Vale o mesmo aviso da v30, e vale mais aqui: o GHL aceitar `attachments` nao
+//         prova que o ZaptosWPP entregou o arquivo. A pos-checagem so pega instancia
+//         caida, nao anexo ignorado. Por isso o painel de cobranca so libera o PDF no
+//         WhatsApp depois de um envio de teste conferido no aparelho.
+//      2. `forcar_dono`. O numero de saida no WhatsApp e o do `assignedTo`, e a cobranca
+//         precisa sair pela Nina e nao pela representante comercial — decisao do gestor.
+//         Trocar o dono e deixar assim ja custou caro nesta base: a v33 conta que um teste
+//         deixou o contato do gestor com a Camyla e derrubou por dois dias os avisos de
+//         lead, que saem pela Nina. Entao aqui a troca e TEMPORARIA: guarda o assignedTo
+//         anterior, manda, e devolve num `finally` — inclusive quando o envio falha, que e
+//         justamente quando esquecer de devolver seria pior. Se a devolucao nao der, a
+//         resposta traz `dono_nao_devolvido` com o id, para nao virar uma perda silenciosa.
