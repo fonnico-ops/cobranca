@@ -1,4 +1,4 @@
-// cobranca-montar (v1) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v4) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -8,11 +8,28 @@
 // detalhe por loja, e nao tres cobrancas no mesmo dia — e assim que o campanhas-cobranca ja
 // trata a carteira, e repetir tres vezes e como o cliente para de levar a serio o remetente.
 //
-// O TEXTO E ESCRITO EM CODIGO, NAO POR IA. A campanha de cobranca do catalogo previa texto de
-// IA, e para o tom inicial isso funciona. Mas aqui a mensagem carrega valor, vencimento e
-// numero de NF: um digito trocado manda o cliente pagar o que nao deve, e o time perde a
-// conversa toda discutindo o numero em vez do pagamento. O modelo e fixo; a unica variacao e
-// a fase (vencido x a vencer) e o tamanho da lista.
+// O TEXTO E ESCRITO EM CODIGO, NAO POR IA. A mensagem carrega valor, vencimento e numero de
+// NF: um digito trocado manda o cliente pagar o que nao deve, e o time perde a conversa toda
+// discutindo o numero em vez do pagamento. O modelo e fixo; a variacao e a fase (vencido x a
+// vencer), o tamanho da lista e o que se pode dizer sobre o boleto.
+//
+// v4: ASSINATURA EM DADO, IGUAL NOS DOIS CANAIS. Era so "Nina — Nitronplast", o que serve no
+//     WhatsApp mas e fraco num e-mail de cobranca: sem razao social e CNPJ, um e-mail pedindo
+//     pagamento tem cara de golpe, justo quando o cliente vai pagar. Agora vem de
+//     cobranca_config.assinatura e campo vazio NAO e impresso — placeholder de rodape
+//     chegando ao cliente seria pior do que rodape nenhum. Ver assinar().
+//     Junto, duas correcoes que so apareceram ao RENDERIZAR o e-mail:
+//       - "Segue os boletos" -> "Seguem os boletos";
+//       - os botoes de boleto vinham DEPOIS da assinatura, entao o cliente lia "Obrigada!",
+//         achava que tinha acabado, e o botao de pagar ficava no rodape. Agora o texto leva
+//         um marcador na posicao certa (MARCA_BOLETOS).
+// v3: a mensagem tem TRES caminhos sobre o boleto, nao dois — anexo, "eu providencio", e
+//     "saiu pelo banco". Ver sobreOsBoletos().
+// v2: duas correcoes que so a primeira rodada seca com dado de producao revelou.
+//   1. TETO NA LISTA. Uma rede de 50 lojas gerou uma mensagem com as 352 duplicatas, uma por
+//      linha. Ver linhasTitulos().
+//   2. SAUDACAO. A cobranca abria com "Ola, 001!" — o "nome do contato" vinha do cadastro do
+//      parceiro e era a razao social "001 - INTERLAGOS - SP". Ver primeiroNome().
 //
 // POST { fase: "vencido" | "a_vencer", rodada?: "YYYY-MM-DD", limite?: n, seco?: true }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -122,6 +139,44 @@ const TETO_WPP = 12;
 const TETO_EMAIL = 40;
 
 /**
+ * Onde os botoes de boleto entram no e-mail.
+ *
+ * Eles vinham grudados no fim do corpo, DEPOIS da assinatura — visto na renderizacao do
+ * e-mail em 22/09. Assinatura no meio da mensagem faz o leitor achar que acabou e parar de
+ * ler; o botao de pagar ficava no rodape, abaixo do "Obrigada!". Agora o texto carrega um
+ * marcador na posicao certa: o e-mail troca pelos botoes, o WhatsApp apaga a linha (la o
+ * anexo e o proprio arquivo, nao um link).
+ */
+const MARCA_BOLETOS = "[[BOLETOS]]";
+/** Onde o rodape de identificacao comeca. O e-mail o separa; o WhatsApp so apaga a marca. */
+const MARCA_RODAPE = "[[RODAPE]]";
+
+/**
+ * A assinatura, igual nos dois canais (decisao do gestor em 22/09).
+ *
+ * Duas partes: a linha de quem assina e o rodape que identifica a empresa. O rodape existe
+ * porque cobranca por e-mail sem razao social e CNPJ tem cara de golpe — justo quando se
+ * esta pedindo para o cliente pagar. No WhatsApp ele tambem vai: a decisao foi manter as
+ * duas pontas iguais.
+ *
+ * CAMPO VAZIO NAO APARECE. Se telefone ou e-mail estiverem em branco na config, a linha nao
+ * e impressa. Nunca deixar placeholder ali: "(xx) xxxx-xxxx" chegando ao cliente e pior do
+ * que rodape nenhum.
+ */
+function assinar(despedida: string, a: any): string {
+  const linha = String(a?.linha || "").trim() || "Nitron";
+  const rodape = [
+    String(a?.razao_social || "").trim(),
+    a?.cnpj ? "CNPJ " + String(a.cnpj).trim() : "",
+    [a?.telefone ? String(a.telefone).trim() : "", a?.email ? String(a.email).trim() : ""]
+      .filter(Boolean).join(" · "),
+  ].filter(Boolean);
+  const out = [despedida, linha];
+  if (rodape.length) out.push(MARCA_RODAPE + "", ...rodape);
+  return out.join("\n");
+}
+
+/**
  * O que dizer sobre o boleto. Tres situacoes, nao duas.
  *
  * A terceira so apareceu quando a gestao explicou, em 22/09, por que alguns titulos estao
@@ -134,13 +189,21 @@ const TETO_EMAIL = 40;
  * para quem consegue tira-lo no banco, em vez de prometer automatico.
  */
 function sobreOsBoletos(ctx: any): string[] {
-  const { comBoleto, semBoleto, semGeravel, semNoBanco } = ctx;
+  const { comBoleto, semBoleto } = ctx;
+  // Quem chama daqui sempre passa os dois, mas se vierem ausentes a mensagem NAO pode perder
+  // a frase do boleto em silencio — foi o que aconteceu com os testes anteriores a esta
+  // divisao. Na duvida, trata o que falta como "da para providenciar", que e o comportamento
+  // anterior a ela; o caminho do banco so aparece quando alguem afirma que e o caso.
+  const semNoBanco = Number(ctx.semNoBanco) || 0;
+  const semGeravel = ctx.semGeravel === undefined
+    ? Math.max(0, (Number(semBoleto) || 0) - semNoBanco)
+    : (Number(ctx.semGeravel) || 0);
   const out: string[] = [];
 
   if (comBoleto) {
     out.push(semBoleto
-      ? `Seguem em anexo ${comBoleto === 1 ? "o boleto" : "os " + comBoleto + " boletos"} que tenho aqui.`
-      : `Segue ${comBoleto === 1 ? "o boleto" : "os boletos"} em anexo para pagamento.`);
+      ? (comBoleto === 1 ? "Segue em anexo o boleto que tenho aqui." : `Seguem em anexo os ${comBoleto} boletos que tenho aqui.`)
+      : (comBoleto === 1 ? "Segue o boleto em anexo para pagamento." : "Seguem os boletos em anexo para pagamento."));
   }
 
   if (semGeravel) {
@@ -162,7 +225,7 @@ function sobreOsBoletos(ctx: any): string[] {
 }
 
 function textoVencido(ctx: any): string {
-  const { nome, titulos, total, maiorAtraso, comBoleto, semBoleto, multi, nomes, remetente, teto } = ctx;
+  const { nome, titulos, total, maiorAtraso, comBoleto, semBoleto, multi, nomes, teto } = ctx;
   const saud = `Olá, ${nome ? nome + "!" : "tudo bem?"}`;
   const abertura = maiorAtraso <= 7
     ? `Passando para lembrar de ${titulos.length === 1 ? "um título que venceu" : "alguns títulos que venceram"} há poucos dias aqui na Nitronplast.`
@@ -176,12 +239,13 @@ function textoVencido(ctx: any): string {
   if (multi) partes.push(`(títulos de ${new Set(titulos.map((t: any) => t.codparc)).size} lojas do grupo, reunidos numa mensagem só)`);
   partes.push("");
   partes.push(...sobreOsBoletos(ctx));
-  partes.push("", "Se já tiver pago, por favor me mande o comprovante que eu dou baixa. E se precisar de prazo ou de parcelar, me diga que eu levo ao financeiro.", "", `Obrigada!\n${remetente} — Nitronplast`);
+  partes.push(MARCA_BOLETOS);
+  partes.push("", "Se já tiver pago, por favor me mande o comprovante que eu dou baixa. E se precisar de prazo ou de parcelar, me diga que eu levo ao financeiro.", "", assinar("Obrigada!", ctx.assinatura));
   return partes.filter((p) => p !== null && p !== undefined).join("\n");
 }
 
 function textoAVencer(ctx: any): string {
-  const { nome, titulos, total, comBoleto, semBoleto, multi, nomes, remetente, teto } = ctx;
+  const { nome, titulos, total, comBoleto, semBoleto, multi, nomes, teto } = ctx;
   const partes = [
     `Olá, ${nome ? nome + "!" : "tudo bem?"}`, "",
     `Passando para avisar ${titulos.length === 1 ? "do título que vence" : "dos títulos que vencem"} na próxima semana aqui na Nitronplast — assim não pega ninguém de surpresa:`, "",
@@ -189,16 +253,28 @@ function textoAVencer(ctx: any): string {
     `Total: *${brl(total)}*`, "",
   ];
   partes.push(...sobreOsBoletos(ctx));
-  partes.push("", `Qualquer coisa, estou por aqui.\n${remetente} — Nitronplast`);
+  partes.push(MARCA_BOLETOS);
+  partes.push("", assinar("Qualquer coisa, estou por aqui.", ctx.assinatura));
   return partes.join("\n");
 }
 
 /** O e-mail leva o mesmo conteudo, com o link do boleto alem do anexo. */
 function html(texto: string, boletos: any[]): string {
-  const corpo = texto
+  // o rodape da assinatura vai em corpo menor e cinza, separado por um filete \u2014 no e-mail
+  // ele e identificacao, nao mensagem, e com o mesmo peso do texto competiria com a cobranca
+  const [acima, abaixo] = (() => {
+    const i = texto.indexOf(MARCA_RODAPE);
+    return i < 0 ? [texto, ""] : [texto.slice(0, i), texto.slice(i + MARCA_RODAPE.length)];
+  })();
+  const esc = (t: string) => t
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/\*([^*\n]+)\*/g, "<strong>$1</strong>")
     .replace(/\n/g, "<br>");
+  const corpo = esc(acima);
+  const rodapeHtml = abaixo.trim()
+    ? '<div style="margin-top:20px;padding-top:12px;border-top:1px solid #e3e5e9;font:12px/1.55 system-ui,sans-serif;color:#777">'
+      + esc(abaixo.replace(/^\n+/, "")) + "</div>"
+    : "";
   // O link vai ALEM do anexo, nao no lugar dele. Anexo de PDF e a primeira coisa que filtro
   // de spam corporativo remove, e o cliente ficaria com um e-mail falando de um boleto que
   // nao esta la. Com o link, a cobranca continua de pe mesmo se o anexo nao passar.
@@ -207,7 +283,11 @@ function html(texto: string, boletos: any[]): string {
         `<a href="${b.url}" style="display:inline-block;margin:4px 8px 4px 0;padding:8px 14px;background:#0b5;color:#fff;text-decoration:none;border-radius:6px;font:600 13px system-ui,sans-serif">Boleto venc. ${dataBr(b.dtvenc)} — ${brl(b.valor)}</a>`
       ).join("") + '</p><p style="margin:8px 0 0;font:12px system-ui,sans-serif;color:#666">Os boletos também seguem anexos a este e-mail.</p>'
     : "";
-  return `<div style="font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#111;max-width:620px">${corpo}${links}</div>`;
+  // o marcador vira os botoes; se nao houver boleto, some sem deixar linha vazia
+  const miolo = corpo.includes(MARCA_BOLETOS)
+    ? corpo.replace(MARCA_BOLETOS + "<br>", links).replace(MARCA_BOLETOS, links)
+    : corpo + links;
+  return `<div style="font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#111;max-width:620px">${miolo}${rodapeHtml}</div>`;
 }
 
 /* ----------------------------------------------------------------------- main */
@@ -229,6 +309,7 @@ Deno.serve(async (req) => {
     const CAP = Math.max(1, Math.min(500, Number(b.limite) || Number(cfg?.cap_grupos_run) || 40));
     const REENVIO = Math.max(0, Number(cfg?.reenvio_min_dias ?? 5));
     const REMETENTE = String(cfg?.remetente || "Nina");
+    const ASSINATURA = (cfg?.assinatura && typeof cfg.assinatura === "object") ? cfg.assinatura : {};
 
     /* ---- titulos da fase ---- */
     const titulos: any[] = [];
@@ -303,12 +384,13 @@ Deno.serve(async (req) => {
       const base = {
         nome: saudacao, titulos: ordenados, total, maiorAtraso,
         comBoleto: boletos.length, semBoleto, semGeravel, semNoBanco,
-        multi: codparcs.length > 1, nomes, remetente: REMETENTE,
+        multi: codparcs.length > 1, nomes, remetente: REMETENTE, assinatura: ASSINATURA,
       };
       const escreve = (teto: number) => fase === "vencido"
         ? textoVencido({ ...base, teto })
         : textoAVencer({ ...base, teto });
-      const mensagem = escreve(TETO_WPP);      // WhatsApp: curto, para ser lido no celular
+      // WhatsApp: sem link (o anexo e o proprio arquivo) e sem a marca do rodape
+      const mensagem = escreve(TETO_WPP).replace("\n" + MARCA_BOLETOS, "").replace(MARCA_RODAPE, "");
       const textoEmail = escreve(TETO_EMAIL);  // e-mail: cabe mais detalhe
       const assunto = fase === "vencido"
         ? `Nitronplast — título${ordenados.length > 1 ? "s" : ""} em aberto (${brl(total)})`

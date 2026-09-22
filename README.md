@@ -45,7 +45,44 @@ onde alguém lê a mensagem e aprova.
 Na sexta as duas listas coincidem e o **a vencer ganha**: o cliente recebe no máximo um
 toque por dia. O vencido daquela sexta volta na segunda.
 
----
+## A mensagem
+
+Escrita em código, não por IA — ela carrega valor, vencimento e número de NF, e um dígito
+trocado manda o cliente pagar o que não deve.
+
+**Quatro regras fixas:**
+
+1. Nunca cita outro cliente nem o total da carteira.
+2. Nunca ameaça no primeiro toque — protesto e negativação não aparecem.
+3. Sempre dá uma saída: comprovante, prazo, parcelamento.
+4. Sempre diz o que está anexo, e sempre diz quando **não** está.
+
+O texto varia em quatro pontos: até 7 dias de atraso é "passando para lembrar", acima disso
+"estou entrando em contato"; quem não tem nome de pessoa recebe "Olá, tudo bem?"; a frase do
+boleto tem três versões (anexo / eu providencio / saiu pelo banco); e listas longas viram
+resumo por loja.
+
+**Assinatura — a mesma nos dois canais** (`cobranca_config.assinatura`):
+
+```
+Obrigada!
+Nina — Financeiro Nitron
+
+NITRONPLAST INDÚSTRIA E COMÉRCIO LTDA
+CNPJ 54.886.460/0001-98
+(11) 96456-0761 · cobranca@nitron.com.br
+```
+
+No e-mail o rodapé sai em corpo menor e cinza, separado por um filete: ali ele é
+identificação, não mensagem. **Campo vazio não é impresso** — nunca deixe placeholder na
+config, ele chegaria ao cliente.
+
+**E-mail:** assunto `Nitronplast — títulos em aberto (R$ X)`, PDFs anexos e botões de link
+logo após a frase do boleto (não no rodapé), porque anexo de PDF é a primeira coisa que
+filtro de spam corporativo remove.
+
+**WhatsApp:** sai pelo número **(11) 96456-0761 — Nina Financeiro**, via GHL. O envio usa
+`type: "SMS"` na API do GHL, que é o que o Zaptos converte em WhatsApp.
 
 ## Para quem a cobrança vai
 
@@ -177,6 +214,8 @@ POST /functions/v1/campanha-dono   { "acao": "devolver", "campanha": "cobranca" 
 | `empresas` | `{1,2,14}` | empresas do Sankhya |
 | `tipos_titulo` | `{4,55}` | CODTIPTIT que é boleto. Fora daqui não se cobra |
 | `boleto_nao_geravel` | Grafeno + Safra | contas/janelas cujo boleto saiu direto no banco |
+| `assinatura` | Nina — Financeiro Nitron | quem assina + rodapé de identificação |
+| `remetente` | `Nina` | primeiro nome usado no corpo ("me avise e eu providencio") |
 
 ---
 
@@ -212,6 +251,7 @@ sql/002_cobranca_ajustes.sql             bucket dos boletos e a coluna `envios`
 sql/003_cron.sql                         a cadência no pg_cron
 sql/004_tipo_titulo.sql                  só título que é boleto
 sql/005_boleto_geravel.sql               quais não podem ganhar boleto novo
+sql/006_assinatura.sql                   a assinatura das mensagens
 supabase/functions/
   cobranca-titulos-refresh/index.ts      Sankhya → cobranca_titulo + cobranca_contato
   cobranca-boleto/index.ts               orquestra a renderização e o upload
