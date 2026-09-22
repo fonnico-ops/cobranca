@@ -1,4 +1,4 @@
-// cobranca-montar (v8) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v9) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -13,6 +13,9 @@
 // discutindo o numero em vez do pagamento. O modelo e fixo; a variacao e a fase (vencido x a
 // vencer), o tamanho da lista e o que se pode dizer sobre o boleto.
 //
+// v9: o aviso da semana anterior virou LEMBRETE. Desde que o cobranca-emitidos manda o
+//     boleto na emissao, o cliente ja tem o PDF ha semanas quando este aviso chega, e
+//     repetir o anexo ensina a ignorar os dois. Ver textoAVencer().
 // v8: o rodape leva os fixos para ligacao, o WhatsApp rotulado e o e-mail em linha
 //     propria. Ver assinar().
 // v7: "Ola, lorrany!" — o cadastro nao tem padrao de caixa. Ver primeiroNome().
@@ -265,16 +268,43 @@ function textoVencido(ctx: any): string {
   return partes.filter((p) => p !== null && p !== undefined).join("\n");
 }
 
+/**
+ * O aviso da semana anterior e LEMBRETE, nao reenvio.
+ *
+ * Desde que o cobranca-emitidos passou a mandar o boleto no dia em que ele e registrado no
+ * banco, o cliente ja tem o PDF ha semanas quando esta mensagem chega. Repetir os anexos
+ * aqui ensina o cliente a ignorar os dois: ele passa a achar que toda mensagem nossa e a
+ * mesma coisa, e para de abrir. Entao aqui so lembra a data, e a 2a via fica a pedido.
+ *
+ * `jaTem` diz quantos daqueles titulos JA foram entregues na emissao. Quando algum nao
+ * foi — boleto que saiu depois, cliente novo, falha de envio no dia — esse vai anexo, com
+ * a frase certa. O cliente que nao recebeu nada nao pode ficar sem o documento so porque a
+ * mensagem virou lembrete.
+ */
 function textoAVencer(ctx: any): string {
   const { nome, titulos, total, multi, nomes, teto, empresa } = ctx;
+  const n = titulos.length;
+  const faltam = Math.max(0, n - (Number(ctx.jaTem) || 0));
   const partes = [
     `Olá, ${nome ? nome + "!" : "tudo bem?"}`, "",
-    `Passando para avisar ${titulos.length === 1 ? "do título que vence" : "dos títulos que vencem"} na próxima semana aqui na ${empresa} — assim não pega ninguém de surpresa:`, "",
+    `Passando para lembrar ${n === 1 ? "do título que vence" : "dos títulos que vencem"} na próxima semana aqui na ${empresa}:`, "",
     linhasTitulos(titulos, multi, nomes, teto), "",
     `Total: *${brl(total)}*`, "",
   ];
-  partes.push(...sobreOsBoletos(ctx));
-  partes.push(MARCA_BOLETOS);
+  if (faltam === 0) {
+    // ele ja tem tudo: nao reenvia, so lembra que tem
+    partes.push(n === 1
+      ? "O boleto eu já te mandei quando ele foi emitido — está aqui na nossa conversa. Se não achar, me avisa que eu reenvio."
+      : "Os boletos eu já te mandei quando foram emitidos — estão aqui na nossa conversa. Se não achar algum, me avisa que eu reenvio.");
+  } else if (faltam === n) {
+    partes.push(...sobreOsBoletos(ctx));
+    partes.push(MARCA_BOLETOS);
+  } else {
+    partes.push(faltam === 1
+      ? "Um desses boletos ainda não tinha ido para você — segue em anexo. Os outros eu já te mandei na emissão."
+      : `${faltam} desses boletos ainda não tinham ido para você — seguem em anexo. Os outros eu já te mandei na emissão.`);
+    partes.push(MARCA_BOLETOS);
+  }
   partes.push("", assinar("Qualquer coisa, estou por aqui.", ctx.assinatura));
   return partes.join("\n");
 }
@@ -358,6 +388,19 @@ Deno.serve(async (req) => {
     const { data: silencio } = await sb.from("cobranca_conversa").select("grupo").eq("nao_perturbe", true);
     const naoPerturbe = new Set((silencio || []).map((x: any) => String(x.grupo)));
 
+    /* ---- o que o cliente JA TEM -------------------------------------------------
+       Só importa no aviso da semana anterior, que virou lembrete: ver textoAVencer().
+       No vencido nao se consulta — la o boleto vai junto de qualquer jeito, porque a
+       mensagem existe para ele pagar agora, nao para ele lembrar de uma data. */
+    const jaEntregue = new Set<number>();
+    if (fase === "a_vencer") {
+      const nufins = elegiveis.map((t) => Number(t.nufin));
+      for (let i = 0; i < nufins.length; i += 500) {
+        const { data } = await sb.from("boleto_entregue").select("nufin").in("nufin", nufins.slice(i, i + 500));
+        for (const x of (data || [])) jaEntregue.add(Number(x.nufin));
+      }
+    }
+
     /* ---- quem ja foi cobrado ha pouco nao entra de novo ---- */
     const corte = new Date(Date.now() - REENVIO * 86400000).toISOString().slice(0, 10);
     const { data: recentes } = await sb.from("cobranca_fila")
@@ -418,6 +461,7 @@ Deno.serve(async (req) => {
         comBoleto: boletos.length, semBoleto, semGeravel, semNoBanco,
         multi: codparcs.length > 1, nomes, remetente: REMETENTE, assinatura: ASSINATURA,
         empresa: EMPRESA_NOME,
+        jaTem: ordenados.filter((t) => jaEntregue.has(Number(t.nufin))).length,
       };
       const escreve = (teto: number) => fase === "vencido"
         ? textoVencido({ ...base, teto })
@@ -429,13 +473,18 @@ Deno.serve(async (req) => {
         ? `${EMPRESA_NOME} — título${ordenados.length > 1 ? "s" : ""} em aberto (${brl(total)})`
         : `${EMPRESA_NOME} — vencimento${ordenados.length > 1 ? "s" : ""} da próxima semana (${brl(total)})`;
 
+      // No lembrete o anexo e so do que o cliente ainda NAO tem. No vencido vai tudo.
+      const boletosDoCard = fase === "a_vencer"
+        ? boletos.filter((x: any) => !jaEntregue.has(Number(x.nufin)))
+        : boletos;
+
       cards.push({
         rodada, fase, grupo: Number(g), nome: nomes[String(ancora)] || null,
         codparcs, nufins: ordenados.map((t) => t.nufin),
         n_titulos: ordenados.length, valor: Math.round(total * 100) / 100, maior_atraso: maiorAtraso,
-        boletos, sem_boleto: semBoleto, sem_boleto_no_banco: semNoBanco,
+        boletos: boletosDoCard, sem_boleto: semBoleto, sem_boleto_no_banco: semNoBanco,
         contatos, origem_contato: contatos[0]?.origem || null,
-        mensagem, assunto, corpo_email: html(textoEmail, boletos),
+        mensagem, assunto, corpo_email: html(textoEmail, boletosDoCard),
         status: contatos.length ? "aguardando" : "sem_contato",
         motivo: contatos.length ? null : "nenhum contato utilizavel: nem no financeiro do Sankhya, nem no cadastro do parceiro, nem no CRM",
       });
