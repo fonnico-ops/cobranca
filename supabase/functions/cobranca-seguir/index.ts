@@ -1,4 +1,4 @@
-// cobranca-seguir (v1) — a insistencia, e o ponto em que ela para.
+// cobranca-seguir (v2) — a insistencia, e o ponto em que ela para.
 //
 // O cobranca-montar/aprovar da UM toque e acaba. Quem nao responde ao primeiro toque nunca
 // mais e lembrado — e quem nao responde ao primeiro toque e exatamente quem se queria cobrar.
@@ -20,6 +20,10 @@
 //   - nao toca conversa 'repassada': dela a pessoa cuida, e robo escrevendo por cima da
 //     atendente apaga o trabalho dela no meio;
 //   - nao toca quem pediu para parar (nao_perturbe), nem quem ja pagou.
+//
+// v2: DO 3o TOQUE EM DIANTE O TOM ENDURECE (decisao da gestao em 22/09). A severidade vem
+//     dos DIAS DE ATRASO reais, nao do numero do toque, e cada passo da regua e anunciado
+//     com a data exata. Ver blocoRegua() — e as tres regras que a mantem honesta.
 //
 // POST { dry?: true, limite?: n, ignorar_janela?: true }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -56,13 +60,59 @@ export function proximoToqueEm(dias: number, base = new Date()): Date {
   return d;
 }
 
+/* ==================================================================== a regua
+ * Os passos da cobranca por DIAS DE ATRASO, vindos de cobranca_config.regua_cobranca:
+ *   10 dias  negativacao nos orgaos de protecao ao credito
+ *   15 dias  protesto em cartorio
+ *   25 dias  notificacao extrajudicial
+ *
+ * DUAS REGRAS QUE NAO SAO ESTILO, SAO O QUE MANTEM O AVISO VALENDO:
+ *
+ * 1. A mensagem anuncia o que VAI acontecer, com a data. Nunca afirma que um passo ja
+ *    foi executado — este motor nao negativa, nao protesta e nao notifica ninguem; quem
+ *    faz isso e o financeiro. Escrever "seu titulo foi negativado" quando ninguem
+ *    negativou e mentir para o cliente, e ele descobre em um telefonema.
+ *
+ * 2. A data sai do VENCIMENTO do titulo mais antigo + os dias do passo, calculada aqui.
+ *    Prazo redondo ("em breve", "nos proximos dias") nao cobra ninguem: e a data no
+ *    calendario que faz a pessoa pagar.
+ *
+ * E a terceira, que e da gestao e nao do codigo: so pode estar na regua o que a empresa
+ * faz de verdade. Anunciar um passo e nao executa-lo ensina a carteira inteira a ignorar
+ * o aviso — e ai nenhuma mensagem funciona mais.
+ */
+export function blocoRegua(maisAntigoVenc: string, atraso: number, regua: any[]): string {
+  const passos = (Array.isArray(regua) ? regua : [])
+    .map((r) => ({ dias: Number(r?.dias) || 0, passo: String(r?.passo || "").trim() }))
+    .filter((r) => r.dias > 0 && r.passo)
+    .sort((a, b) => a.dias - b.dias);
+  if (!passos.length || !maisAntigoVenc) return "";
+
+  const emData = (dias: number) => {
+    const d = new Date(maisAntigoVenc + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + dias);
+    return dataBrLonga(d.toISOString().slice(0, 10));
+  };
+  const lista = passos.map((r) => `• ${r.dias} dias de atraso — ${r.passo}`).join("\n");
+  const proximo = passos.find((r) => r.dias > atraso);
+
+  return [
+    "Como funciona a cobrança aqui:",
+    lista,
+    proximo
+      ? `O próximo passo é ${proximo.passo}, em ${emData(proximo.dias)}.`
+      : "Todos os prazos acima já venceram neste título.",
+  ].join("\n\n");
+}
+
 /* ===================================================================== os textos
    Tres regras herdadas do cobranca-montar, que valem igual aqui:
-   nunca ameacar, nunca citar outro cliente, e sempre deixar uma saida — cobranca sem saida
-   vira briga, e briga nao paga titulo. O que MUDA de um toque para o outro e a clareza,
-   nao a dureza. O toque 5 avisa que uma pessoa vai assumir, o que e um fato, nao ameaca. */
+   nunca ameacar SEM base, nunca citar outro cliente, e sempre deixar uma saida — cobranca
+   sem saida vira briga, e briga nao paga titulo. Do 3o toque em diante a regua entra, e ai
+   o que endurece e a CLAREZA sobre o que vai acontecer e quando, nao o tom agressivo. */
 export function textoToque(n: number, ctx: {
   nome: string; total: number; titulos: any[]; temBoleto: boolean; empresa: string; maxToques: number;
+  atraso?: number; regua?: any[];
 }): string {
   const ola = ctx.nome ? `Olá, ${ctx.nome}!` : "Olá!";
   const plural = ctx.titulos.length > 1;
@@ -73,6 +123,28 @@ export function textoToque(n: number, ctx: {
   const boleto = ctx.temBoleto
     ? (plural ? "Os boletos seguem em anexo." : "O boleto segue em anexo.")
     : "Se precisar da segunda via, é só me pedir que eu providencio.";
+
+  /* ---- do 3o toque em diante o tom endurece, mas SO com divida vencida -------------
+     A regua fala em negativacao, cartorio e notificacao extrajudicial. Num aviso de
+     vencimento futuro, ou num titulo que ainda nao venceu, isso nao faz sentido nenhum
+     e destroi a relacao com um cliente que nao deve nada ainda. Sem regua configurada,
+     ou sem atraso, cai no texto cordial de sempre. */
+  const atraso = Number(ctx.atraso) || 0;
+  const regua = atraso > 0 ? blocoRegua(String(maisAntigo?.dtvenc || ""), atraso, ctx.regua || []) : "";
+  const duro = n >= 3 && !!regua;
+
+  if (duro) {
+    const haDias = `Este ${plural ? "grupo de títulos está" : "título está"} vencido há ${atraso} dias e eu não tive nenhum retorno seu.`;
+    const corpo = n === 3
+      ? [`${ola} É a terceira vez que eu procuro você sobre isto.`, haDias, resumo, boleto, regua,
+         "Ainda dá para resolver comigo, e é o que eu prefiro. Me responde hoje?"]
+      : n === 4
+      ? [`${ola} Preciso mesmo de uma posição sua.`, haDias, resumo, boleto, regua,
+         "Se houver algo a acertar antes do pagamento — nota, valor, prazo — me diga agora que eu levo para a equipe. Depois dos prazos acima já não fica comigo."]
+      : [`${ola} Este é o meu último contato sobre este título.`, haDias, resumo, boleto, regua,
+         "Sem retorno hoje, eu encaminho o caso para a nossa equipe de cobrança dar seguimento. Se você me responder ou pagar hoje, eu seguro o encaminhamento."];
+    return corpo.filter(Boolean).join("\n\n");
+  }
 
   const corpo = n <= 2
     ? [`${ola} Voltando aqui no título que te mandei semana passada.`, resumo, boleto,
@@ -162,6 +234,9 @@ Deno.serve(async (req) => {
     const ESPERA: number[] = Array.isArray(cfg?.toques_espera) && cfg.toques_espera.length ? cfg.toques_espera.map(Number) : [2, 3, 4, 7, 7];
     const EMPRESA = String(cfg?.empresa_nome || "Nitron");
     const NOME_INST = String(cfg?.instancia || "Nina Financeiro");
+    // A regua so entra se a gestao ligou o aviso. Desligar aqui devolve o tom cordial
+    // sem deploy — o que importa no dia em que a empresa parar de protestar.
+    const REGUA = cfg?.protesto_aviso === false ? [] : (Array.isArray(cfg?.regua_cobranca) ? cfg.regua_cobranca : []);
 
     // Horario comercial, dia util. O `proximo_toque_em` ja e gravado num dia util as 12:00Z,
     // mas uma promessa marcada para um sabado, ou um deploy atrasado, cairia fora disso —
@@ -212,7 +287,10 @@ Deno.serve(async (req) => {
       const n = Number(c.toques || 0) + 1;
       const texto = c.status === "promessa" && c.promessa_data
         ? textoPromessa({ nome: primeiroNome(c.nome), total, data: String(c.promessa_data), temBoleto: anexos.length > 0 })
-        : textoToque(n, { nome: primeiroNome(c.nome), total, titulos: abertos, temBoleto: anexos.length > 0, empresa: EMPRESA, maxToques: MAX });
+        : textoToque(n, { nome: primeiroNome(c.nome), total, titulos: abertos, temBoleto: anexos.length > 0,
+            empresa: EMPRESA, maxToques: MAX,
+            atraso: Math.max(0, ...abertos.map((t: any) => Number(t.dias_atraso) || 0)),
+            regua: REGUA });
 
       if (dry) { itens.push({ nome: c.nome, resultado: "tocaria", toque: n, canal: c.canal, anexos: anexos.length, texto }); tocadas++; continue; }
 

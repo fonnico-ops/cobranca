@@ -1,4 +1,4 @@
-// cobranca-montar (v6) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v8) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -13,6 +13,9 @@
 // discutindo o numero em vez do pagamento. O modelo e fixo; a variacao e a fase (vencido x a
 // vencer), o tamanho da lista e o que se pode dizer sobre o boleto.
 //
+// v8: o rodape leva os fixos para ligacao, o WhatsApp rotulado e o e-mail em linha
+//     propria. Ver assinar().
+// v7: "Ola, lorrany!" — o cadastro nao tem padrao de caixa. Ver primeiroNome().
 // v6: respeita quem pediu para nao receber mais (cobranca_conversa.nao_perturbe).
 // v5: o nome da empresa no CORPO vem de cobranca_config.empresa_nome, e e "Nitron". O texto
 //     dizia "aqui na Nitronplast" enquanto a assinatura dizia "Nitron" — duas marcas na
@@ -69,6 +72,14 @@ function primeiroNome(s: any): string {
   if (limpo.length < 3) return "";
   const chave = limpo.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   if (NAO_E_NOME.has(chave)) return "";
+  // O cadastro nao tem padrao de caixa: o card de 22/09 do grupo 65542 abriu com
+  // "Ola, lorrany!" porque o contato esta em minuscula no TGFCTT. Entao normaliza —
+  // mas SO quando a palavra e toda minuscula ou toda maiuscula ("JOAO" -> "Joao").
+  // Nome em caixa mista o cadastro escreveu de proposito: "McCarthy" e "d'Avila" nao
+  // se mexe, porque corrigir o que ja estava certo e o erro mais facil de cometer aqui.
+  if (p === p.toLowerCase() || p === p.toUpperCase()) {
+    return p[0].toUpperCase() + p.slice(1).toLowerCase();
+  }
   return p;
 }
 /** Razao social em algo que da para cumprimentar: "COMERCIAL XYZ LTDA" -> "Comercial Xyz". */
@@ -169,11 +180,17 @@ const MARCA_RODAPE = "[[RODAPE]]";
  */
 function assinar(despedida: string, a: any): string {
   const linha = String(a?.linha || "").trim() || "Nitron";
+  // Os fixos primeiro, o WhatsApp rotulado, e o e-mail em linha propria. O cliente que
+  // quer LIGAR precisa achar o numero de ligacao sem ter de adivinhar qual dos tres e
+  // celular — e um rodape de tres contatos amontoados numa linha so nao se le no celular.
+  const fixos = (Array.isArray(a?.telefones) ? a.telefones : []).map((x: any) => String(x || "").trim()).filter(Boolean);
+  const cel = String(a?.telefone || "").trim();
+  const fones = [...fixos, cel ? "WhatsApp " + cel : ""].filter(Boolean).join(" · ");
   const rodape = [
     String(a?.razao_social || "").trim(),
     a?.cnpj ? "CNPJ " + String(a.cnpj).trim() : "",
-    [a?.telefone ? String(a.telefone).trim() : "", a?.email ? String(a.email).trim() : ""]
-      .filter(Boolean).join(" · "),
+    fones,
+    String(a?.email || "").trim(),
   ].filter(Boolean);
   const out = [despedida, linha];
   if (rodape.length) out.push(MARCA_RODAPE + "", ...rodape);

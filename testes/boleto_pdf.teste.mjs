@@ -1,4 +1,4 @@
-import { gerarBoletoPdf, itfElementos, exigirBoleto } from "./boleto_pdf.mjs";
+import { gerarBoletoPdf, itfElementos, exigirBoleto, larguraMm } from "./boleto_pdf.mjs";
 import { writeFileSync } from "node:fs";
 
 let falhas = 0;
@@ -90,6 +90,83 @@ ok(!Buffer.from(comAcento).includes(Buffer.from([0xc3, 0x83])), "nao vazou seque
 console.log("5) escape");
 const t3 = Buffer.from(gerarBoletoPdf({ ...bom, sacado: "LOJA (MATRIZ) \\ FILIAL" })).toString("latin1");
 ok(t3.includes("(LOJA \\(MATRIZ\\) \\\\ FILIAL)"), "parenteses e barra escapados");
+
+/* ============================================================ nada pode atropelar nada
+   O defeito de 22/09: o codigo do banco era desenhado num x FIXO (77 mm) e a linha
+   digitavel, alinhada a direita, chegava a 77,7 mm. Os dois sairam impressos um sobre o
+   outro — no numero que o cliente usa para pagar. No codigo as duas chamadas pareciam
+   inofensivas; so abrindo o PDF dava para ver.
+
+   Este teste le os operadores de texto do proprio PDF e confere que dois textos na mesma
+   linha de base nunca se sobrepoem. Vale para o documento inteiro, nao so para o cabecalho. */
+console.log("N) layout: nenhum texto sobrepoe outro");
+{
+  const MM = 2.834645669;
+  // o titulo real que gerou o defeito (Itau, linha de 54 caracteres)
+  const pdf = gerarBoletoPdf({
+    nufin: 1673273, numnota: 133, valor: 1875, dtvenc: "2026-07-30",
+    linha_digitavel: "34191.09008 01987.581442 64138.310004 2 15230000187500",
+    codigo_barras: "34192152300001875001090001987581442641383100",
+    banco: "Banco Itaú S.A.", codbco: 341, carteira: "109", agencia: "1446", conta: "413831",
+    nossonum: "109000198758", cedente: "NITRONPLAST INDUSTRIA E COMERCIO LTDA",
+    cedente_cnpj: "54886460000198", sacado: "UTIBRINK", sacado_cnpj: "40155330000170",
+  });
+  const txt = Buffer.from(pdf).toString("latin1");
+  const ops = [...txt.matchAll(/BT (\/F[12]) ([\d.]+) Tf 1 0 0 1 ([-\d.]+) ([-\d.]+) Tm \((.*?)\) Tj ET/g)]
+    .map((m) => {
+      const s = m[5].replace(/\\([\\()])/g, "$1");
+      const tam = Number(m[2]);
+      return { negrito: m[1] === "/F2", tam, x: Number(m[3]), y: Number(m[4]), s,
+               w: larguraMm(s, tam, m[1] === "/F2") * MM };
+    });
+  ok(ops.length > 30, `o PDF tem operadores de texto para conferir (${ops.length})`);
+
+  const colisoes = [];
+  for (let i = 0; i < ops.length; i++) {
+    for (let k = i + 1; k < ops.length; k++) {
+      const a = ops[i], b = ops[k];
+      // Compara a FAIXA VERTICAL, nao a linha de base: textos de tamanhos diferentes na
+      // mesma linha tem bases diferentes (13pt e 11pt ficam a 1,6pt um do outro). A
+      // primeira versao deste teste comparava as bases e por isso passou com o codigo
+      // defeituoso — um teste que passa pelo motivo errado e pior do que nenhum.
+      const alto = (o) => o.tam * 0.7;
+      if (!(a.y < b.y + alto(b) && b.y < a.y + alto(a))) continue;
+      if (a.x < b.x + b.w - 0.5 && b.x < a.x + a.w - 0.5) {  // 0.5pt de folga
+        colisoes.push(`"${a.s.slice(0, 22)}" x "${b.s.slice(0, 22)}"`);
+      }
+    }
+  }
+  ok(colisoes.length === 0, colisoes.length ? "COLISAO: " + colisoes.slice(0, 4).join(" | ") : "nenhum texto sobrepoe outro");
+
+  // e a linha digitavel tem de continuar dentro da margem direita (X+W = 195 mm)
+  const dig = ops.filter((o) => o.s.startsWith("34191."));
+  ok(dig.length === 2, "a linha digitavel aparece nas duas vias");
+  for (const d of dig) {
+    ok(d.x >= 15 * MM - 0.5, `linha digitavel nao invade a margem esquerda (x=${(d.x / MM).toFixed(1)}mm)`);
+    ok(d.x + d.w <= 195 * MM + 0.5, `linha digitavel nao passa da margem direita (fim=${((d.x + d.w) / MM).toFixed(1)}mm)`);
+  }
+}
+
+console.log("N+1) larguras da Helvetica batem com o AFM");
+{
+  const quase = (a, b, m) => ok(Math.abs(a - b) < 0.01, m);
+  const MM = 2.834645669;
+  // valores do AFM: digito 556, ponto 278, espaco 278 nas duas fontes
+  quase(larguraMm("0", 1000, false) * MM, 556, "digito na Helvetica = 556");
+  quase(larguraMm("0", 1000, true) * MM, 556, "digito na Helvetica-Bold = 556");
+  quase(larguraMm(".", 1000, true) * MM, 278, "ponto = 278");
+  quase(larguraMm(" ", 1000, true) * MM, 278, "espaco = 278");
+  quase(larguraMm("W", 1000, false) * MM, 944, "W = 944");
+  quase(larguraMm("i", 1000, false) * MM, 222, "i minusculo na Helvetica = 222");
+  // acento usa a largura da letra base — e o que a Helvetica faz
+  quase(larguraMm("ú", 1000, false) * MM, larguraMm("u", 1000, false) * MM, "ú tem a largura de u");
+  quase(larguraMm("ç", 1000, false) * MM, larguraMm("c", 1000, false) * MM, "ç tem a largura de c");
+  // a media antiga superestimava a linha digitavel em ~8 mm: era dai que vinha a colisao
+  const digi = "34191.09008 01987.581442 64138.310004 2 15230000187500";
+  const real = larguraMm(digi, 11, true);
+  const media = digi.length * 11 * 0.56 / MM;
+  ok(real < media - 7, `a media antiga superestimava em ${(media - real).toFixed(1)}mm (real ${real.toFixed(1)}, media ${media.toFixed(1)})`);
+}
 
 console.log(falhas ? `\n${falhas} FALHA(S)` : "\nTodos os testes passaram.");
 process.exit(falhas ? 1 : 0);

@@ -12,6 +12,13 @@ ok(primeiroNome("João") === "João", "aceita acento");
 ok(primeiroNome("  Marcos  Silva ") === "Marcos", "ignora espaco sobrando");
 ok(primeiroNome("Ed") === "", "recusa nome de 2 letras (provavel sigla)");
 ok(primeiroNome("") === "" && primeiroNome(null) === "", "aceita vazio/nulo");
+// producao 22/09, grupo 65542: o card abriu com "Ola, lorrany!" porque o contato esta
+// em minuscula no TGFCTT. Caixa mista o cadastro escreveu de proposito e nao se mexe.
+ok(primeiroNome("lorrany silva") === "Lorrany", "conserta minuscula do cadastro");
+ok(primeiroNome("JOSE CARLOS") === "Jose", "conserta MAIUSCULA do cadastro");
+ok(primeiroNome("MÁRCIA") === "Márcia", "conserta maiuscula com acento");
+ok(primeiroNome("McCarthy") === "McCarthy", "nao mexe em caixa mista (McCarthy)");
+ok(primeiroNome("d'Avila Neto") === "d'Avila", "nao mexe em d'Avila");
 
 console.log("2) teto da lista");
 const mk = (n, lojas) => Array.from({length:n}, (_,i)=>({

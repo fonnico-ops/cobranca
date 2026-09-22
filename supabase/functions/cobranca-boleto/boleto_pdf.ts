@@ -64,6 +64,46 @@ function escapaPdf(s: string): string {
   return String(s ?? "").replace(/([\\()])/g, "\\$1");
 }
 
+/* --------------------------------------------------------------- largura do texto
+ * As larguras REAIS da Helvetica, do AFM da base-14 (em milesimos de em).
+ *
+ * Antes isto era estimado por media: `len * tamanho * 0.56`. Para a linha digitavel,
+ * que e quase toda digito com alguns pontos e espacos, a media SUPERESTIMA em ~8 mm —
+ * e o texto alinhado a direita comecava mais a esquerda do que devia, sentando em cima
+ * do codigo do banco. O defeito so apareceu quando alguem ABRIU o PDF: no codigo as
+ * duas chamadas parecem inofensivas, uma desenha em 77 mm e a outra "a direita".
+ *
+ * Digito = 556 nas duas fontes; ponto e espaco = 278. E dai que vinha o erro.
+ */
+const W_HELV: Record<string, number> = {};
+const W_BOLD: Record<string, number> = {};
+{
+  const ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+  const helv = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,
+    556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,
+    667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,
+    278,278,278,469,556,333,
+    556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,
+    334,260,334,584];
+  const bold = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,
+    556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,
+    722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,
+    333,278,333,584,556,333,
+    556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,
+    389,280,389,584];
+  for (let i = 0; i < ascii.length; i++) { W_HELV[ascii[i]] = helv[i]; W_BOLD[ascii[i]] = bold[i]; }
+}
+/** Largura em mm. Acentuado usa a largura da letra base (e o que a Helvetica faz). */
+export function larguraMm(s: string, tamanho: number, negrito = false): number {
+  const tab = negrito ? W_BOLD : W_HELV;
+  let mil = 0;
+  for (const ch of String(s ?? "")) {
+    const base = ch.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    mil += tab[ch] ?? tab[base] ?? 556;
+  }
+  return (mil / 1000) * tamanho / MM;
+}
+
 type Op = string;
 
 class Pagina {
@@ -80,10 +120,9 @@ class Pagina {
     );
   }
 
-  /** Texto alinhado a direita de xMm. Largura estimada por metrica media da Helvetica. */
+  /** Texto alinhado a direita de xMm, pela largura REAL da fonte (ver larguraMm). */
   textoDir(xMm: number, yMm: number, tamanho: number, s: string, negrito = false) {
-    const larguraPt = String(s ?? "").length * tamanho * (negrito ? 0.56 : 0.5);
-    this.texto(xMm - larguraPt / MM, yMm, tamanho, s, negrito);
+    this.texto(xMm - larguraMm(s, tamanho, negrito), yMm, tamanho, s, negrito);
   }
 
   retangulo(xMm: number, yMm: number, wMm: number, hMm: number) {
@@ -194,10 +233,26 @@ function desenhaFicha(p: Pagina, t: Titulo, topo: number, viaRecibo: boolean) {
   const codBanco = String(t.codbco ?? "").replace(/\D/g, "");
   let y = topo;
 
-  // --- cabecalho: banco, codigo, linha digitavel
-  p.texto(X, y, 13, corta(banco, 34), true);
-  p.texto(X + 62, y, 13, codBanco ? `${codBanco}-${dvBanco(t)}` : "", true);
-  p.textoDir(X + W, y, 11, String(t.linha_digitavel || "").replace(/\s+/g, " ").trim(), true);
+  /* --- cabecalho: banco, codigo, linha digitavel ---------------------------------
+     Os tres MEDEM antes de se posicionar. A versao anterior punha o codigo do banco num
+     x fixo (X+62) e a linha digitavel alinhada a direita; com 54 caracteres a linha
+     chegava a 77,7 mm e sentava em cima do codigo, em 77 mm. Saiu assim para o cliente:
+     "3419" e "341-9" impressos um sobre o outro, no numero que ele usa para pagar.
+     Agora o codigo vem logo depois do nome, e a linha digitavel encolhe a fonte ate
+     caber no espaco que sobrou — nenhum banco novo pode reintroduzir a colisao. */
+  const nomeBanco = corta(banco, 34);
+  p.texto(X, y, 13, nomeBanco, true);
+  const cod = codBanco ? `${codBanco}-${dvBanco(t)}` : "";
+  const xCod = X + larguraMm(nomeBanco, 13, true) + 4;
+  p.texto(xCod, y, 13, cod, true);
+
+  const digitavel = String(t.linha_digitavel || "").replace(/\s+/g, " ").trim();
+  const sobra = (X + W) - (xCod + larguraMm(cod, 13, true) + 4);
+  let tamLinha = 11;
+  // 6.5pt e o piso: abaixo disso a linha digitavel deixa de ser legivel na tela do
+  // cliente, e ai e melhor ela passar um pouco do que virar um borrao.
+  while (tamLinha > 6.5 && larguraMm(digitavel, tamLinha, true) > sobra) tamLinha -= 0.25;
+  p.textoDir(X + W, y, tamLinha, digitavel, true);
   y += 6;
   p.linhaH(X, y, W, 0.5);
   y += 0.5;

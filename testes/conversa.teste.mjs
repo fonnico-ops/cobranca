@@ -1,5 +1,5 @@
 import { sanear, blocoDivida, blocoOrigem, frasesBoleto, sistema, escolherAtendente } from "./atende_puro.mjs";
-import { textoToque, textoPromessa, proximoToqueEm, agoraSp } from "./seguir_puro.mjs";
+import { textoToque, textoPromessa, proximoToqueEm, agoraSp, blocoRegua } from "./seguir_puro.mjs";
 let f = 0;
 const ok = (c, m) => { if (c) console.log("  ok   " + m); else { console.log("  FALHA " + m); f++; } };
 
@@ -106,6 +106,49 @@ const semNome = textoToque(2, { ...ctx, nome: "" });
 ok(/^Olá!/.test(semNome) && !/Olá, !/.test(semNome), "sem nome, cumprimenta sem nome (e nao 'Ola, !')");
 const plural = textoToque(2, { ...ctx, total: 300, titulos: [{ valor: 100, dtvenc: "2026-08-01" }, { valor: 200, dtvenc: "2026-07-01" }] });
 ok(/2 títulos/.test(plural) && /01\/07/.test(plural), "plural conta certo e usa o vencimento MAIS ANTIGO");
+
+console.log("7b) a régua: do 3º toque em diante o tom endurece");
+const REGUA = [
+  { dias: 10, passo: "negativação nos órgãos de proteção ao crédito" },
+  { dias: 15, passo: "protesto em cartório" },
+  { dias: 25, passo: "notificação extrajudicial" },
+];
+const duro = (n, atraso) => textoToque(n, { ...ctx, atraso, regua: REGUA,
+  titulos: [{ valor: 1000, dtvenc: "2026-08-01" }] });
+
+const t3d = duro(3, 12);
+ok(/vencido há 12 dias/.test(t3d), "diz há quantos dias está vencido");
+ok(/10 dias de atraso — negativação/.test(t3d), "lista a régua inteira");
+ok(/protesto em cartório/.test(t3d) && /notificação extrajudicial/.test(t3d), "os três passos aparecem");
+// a data sai do VENCIMENTO + os dias do passo, nao de "em breve"
+ok(/próximo passo é protesto em cartório, em 16\/08\/2026/.test(t3d), "próximo passo com a data exata (01/08 + 15 dias)");
+ok(!/foi negativado|foi protestado|negativamos|protestamos/i.test(t3d), "NUNCA afirma que um passo já foi executado");
+
+const t3cedo = duro(3, 3);
+ok(/próximo passo é negativação.*11\/08\/2026/.test(t3cedo), "com 3 dias de atraso o próximo passo é a negativação");
+
+const t5tarde = duro(5, 40);
+ok(/Todos os prazos acima já venceram/.test(t5tarde), "passados todos os prazos, diz isso e não inventa um novo");
+ok(/encaminho o caso para a nossa equipe/.test(t5tarde), "o 5º toque encaminha para gente — que é o que o sistema faz de verdade");
+ok(!/eu vou protestar|vou negativar/i.test(t5tarde), "a Nina não promete executar o que quem executa é o financeiro");
+
+// os dois freios
+const aVencer = textoToque(4, { ...ctx, atraso: 0, regua: REGUA });
+ok(!/cartório|negativa|extrajudicial/i.test(aVencer), "sem atraso NÃO fala em cartório (aviso de vencimento futuro)");
+const semRegua = textoToque(4, { ...ctx, atraso: 30, regua: [] });
+ok(!/cartório|negativa|extrajudicial/i.test(semRegua), "régua desligada devolve o tom cordial, sem deploy");
+ok(/levo para a equipe/.test(semRegua), "e volta ao texto antigo");
+
+// toques 1 e 2 seguem cordiais mesmo com atraso grande
+const t2d = duro(2, 40);
+ok(!/cartório|negativa|extrajudicial/i.test(t2d), "o 2º toque continua cordial: a régua só entra no 3º");
+
+console.log("7c) blocoRegua sozinho");
+ok(blocoRegua("", 20, REGUA) === "", "sem vencimento não monta nada");
+ok(blocoRegua("2026-08-01", 20, []) === "", "sem régua configurada não monta nada");
+const r = blocoRegua("2026-08-01", 1, [{ dias: 5, passo: "aviso" }, { dias: 2, passo: "primeiro" }]);
+ok(r.indexOf("primeiro") < r.indexOf("aviso"), "ordena os passos por dias, mesmo fora de ordem na config");
+ok(/em 03\/08\/2026/.test(r), "01/08 + 2 dias = 03/08");
 
 console.log("8) promessa");
 const pr = textoPromessa({ nome: "Ana", total: 500, data: "2026-09-10", temBoleto: false });
