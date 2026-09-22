@@ -174,6 +174,8 @@ contando de 1 em 1.
 
 ```
 sql/001_cobranca_schema.sql              as quatro tabelas
+sql/002_cobranca_ajustes.sql             bucket dos boletos e a coluna `envios`
+sql/003_cron.sql                         a cadencia no pg_cron
 supabase/functions/
   cobranca-titulos-refresh/index.ts      Sankhya → cobranca_titulo + cobranca_contato
   cobranca-boleto/index.ts               orquestra a renderização e o upload
@@ -182,6 +184,7 @@ supabase/functions/
   cobranca-aprovar/index.ts              dispara (WhatsApp na fila, e-mail direto)
   cobranca-painel/index.ts               a tela de aprovação
   cobranca-cron/index.ts                 a cadência
-  _patches/README.md                     por que NÃO alteramos as funções de produção
 docs/ARQUITETURA.md                      o detalhe técnico
+docs/FUNCOES-DE-PRODUCAO.md              por que NÃO alteramos as funções existentes
+testes/                                  os testes e como rodá-los
 ```
