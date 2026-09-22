@@ -1,27 +1,23 @@
 # Testes
 
-Rodam em Node (o gerador de PDF e os textos da mensagem são TypeScript sem nada de Deno).
-
 ```bash
-npm install --no-save esbuild@0.24.0
-
-# 1) gerador de boleto: ITF, estrutura do PDF, acentuação, escape
-npx esbuild ../supabase/functions/cobranca-boleto/boleto_pdf.ts --format=esm --outfile=boleto_pdf.mjs
-node boleto_pdf.teste.mjs
-
-# 2) montagem da mensagem: teto da lista e saudação
-#    (fatia as funções puras do index.ts, que termina em Deno.serve)
-node -e "const fs=require('fs');const s=fs.readFileSync('../supabase/functions/cobranca-montar/index.ts','utf8');
-fs.writeFileSync('montar_puro.ts', s.slice(0, s.indexOf('Deno.serve(')).replace(/^import .*$/m,'') +
-'\nexport { linhasTitulos, primeiroNome, nomeGentil, textoVencido, textoAVencer, html, TETO_WPP, TETO_EMAIL };\n')"
-npx esbuild montar_puro.ts --format=esm --outfile=montar_puro.mjs
-node montar.teste.mjs
-
-# 3) as tres situacoes de boleto na mensagem (anexo / 2a via / emitido no banco)
-node boleto_mensagem.teste.mjs
+./rodar.sh
 ```
 
-O que cada um cobre está em `docs/ARQUITETURA.md`, seções 3 e 4.
+Roda as seis suites. O script existe porque os comandos soltos que estavam aqui envelheceram
+uma vez: a lista de exports do `montar_puro` ficou desatualizada e três suites pararam de
+importar. Agora a lista mora num lugar só.
+
+| suite | o que cobre |
+|---|---|
+| `boleto_pdf` | ITF ida e volta, offsets do xref, `/Length`, acento Latin-1, escape |
+| `montar` | teto da lista (o caso das 352 duplicatas), saudação ("Olá, 001!") |
+| `boleto_mensagem` | as três situações do boleto: anexo / 2ª via / emitido no banco |
+| `assinatura` | rodapé em dado, campo vazio não impresso |
+| `marca` | os botões de boleto antes da assinatura, não depois |
+| `conversa` | `sanear()`, os blocos de dívida e de origem, o rodízio, os cinco toques |
+
+O que cada um cobre em detalhe está em `docs/ARQUITETURA.md`, seções 3, 4, 9 e 10.
 
 Conferência extra do PDF, opcional (rasteriza a primeira página):
 

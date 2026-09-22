@@ -1,4 +1,4 @@
-// cobranca-titulos-refresh (v1) — espelha do Sankhya os titulos abertos que interessam a
+// cobranca-titulos-refresh (v5) — espelha do Sankhya os titulos abertos que interessam a
 // cobranca (vencidos + a vencer na janela) e resolve PARA QUEM mandar cada um.
 //
 // Duas escritas, duas tabelas:
@@ -86,7 +86,8 @@ const dataIso = (x: any) => {
 const SQL_TITULOS = (emp: string, tipos: string, dias: number, atrasoMax: number, off: number) => `
 SELECT NUFIN, CODPARC, MATRIZ, CODEMP, NUMNOTA, DTVENC, DIAS, VLR, NOSSONUM, CODBCO, NOMEBCO,
        CARTEIRA, CODAGE, CODCTABCO, LINHADIG, CODBARRA, PIXQR, CEDENTE, CEDCNPJ, SACADO, SACCNPJ,
-       CODTIPTIT, DESCTIPTIT, DTNEG, CODCTABCOINT, CONTADESC
+       CODTIPTIT, DESCTIPTIT, DTNEG, CODCTABCOINT, CONTADESC,
+       SERIE, PARCELA, PARCTOT, DTEMISSAO, OPERACAO, CONTRATO, CONTPARC, CONTVLR, CONTINI
 FROM (
   SELECT f.NUFIN NUFIN, f.CODPARC CODPARC, NVL(p.CODPARCMATRIZ,0) MATRIZ, f.CODEMP CODEMP,
          f.NUMNOTA NUMNOTA, TO_CHAR(f.DTVENC,'YYYY-MM-DD') DTVENC,
@@ -96,13 +97,33 @@ FROM (
          f.LINHADIGITAVEL LINHADIG, f.CODIGOBARRA CODBARRA, f.AD_PIXQRCODE PIXQR,
          e.RAZAOSOCIAL CEDENTE, e.CGC CEDCNPJ, p.NOMEPARC SACADO, p.CGC_CPF SACCNPJ,
          f.CODTIPTIT CODTIPTIT, tt.DESCRTIPTIT DESCTIPTIT,
-         TO_CHAR(f.DTNEG,'YYYY-MM-DD') DTNEG, f.CODCTABCOINT CODCTABCOINT, c.DESCRICAO CONTADESC
+         TO_CHAR(f.DTNEG,'YYYY-MM-DD') DTNEG, f.CODCTABCOINT CODCTABCOINT, c.DESCRICAO CONTADESC,
+         -- DE ONDE VEM ESTE BOLETO. E a primeira pergunta de quem recebe uma cobranca, e
+         -- ate aqui a unica resposta possivel era "NF 188412" — que nao diz nada a ninguem.
+         f.SERIENOTA SERIE, f.DESDOBRAMENTO PARCELA,
+         -- quantas parcelas a nota gerou. Conta os desdobramentos de receita da MESMA nota,
+         -- inclusive os ja baixados: "parcela 2 de 3" so faz sentido contando as pagas.
+         (SELECT COUNT(*) FROM TGFFIN x
+           WHERE x.NUNOTA = f.NUNOTA AND x.RECDESP = 1 AND x.PROVISAO = 'N') PARCTOT,
+         -- DTENTSAI e a SAIDA DA NOTA, nao a entrega. O ERP nao tem data de entrega destes
+         -- titulos (AD_DTENTREGA e AD_STATUSENTREGA: zero preenchidos em 2.465; agendamento:
+         -- 2). Dizer "saiu em" e verdade; dizer "foi entregue em" seria invencao — e numa
+         -- cobranca isso entrega ao cliente o argumento para nao pagar.
+         TO_CHAR(cab.DTENTSAI,'YYYY-MM-DD') DTEMISSAO, top.DESCROPER OPERACAO,
+         -- Clube: o titulo nao tem nota, tem contrato. Sao 397 dos 2.465.
+         f.AD_NUCONT CONTRATO, ct.QTDPARCELAS CONTPARC, ct.VLRMENSAL CONTVLR,
+         TO_CHAR(ct.DTINIVIGENCIA,'YYYY-MM-DD') CONTINI
   FROM TGFFIN f
   JOIN TGFPAR p ON p.CODPARC = f.CODPARC AND p.TIPPESSOA = 'J'
   LEFT JOIN TSIEMP e ON e.CODEMP = f.CODEMP
   LEFT JOIN TSIBCO b ON b.CODBCO = f.CODBCO
   LEFT JOIN TSICTA c ON c.CODCTABCOINT = f.CODCTABCOINT
   LEFT JOIN TGFTIT tt ON tt.CODTIPTIT = f.CODTIPTIT
+  LEFT JOIN TGFCAB cab ON cab.NUNOTA = f.NUNOTA
+  -- TGFCAB -> TGFTOP e join COMPOSTO (CODTIPOPER, DHTIPOPER). Ligar so pela primeira
+  -- coluna multiplica as linhas por cada versao historica da operacao.
+  LEFT JOIN TGFTOP top ON top.CODTIPOPER = cab.CODTIPOPER AND top.DHALTER = cab.DHTIPOPER
+  LEFT JOIN AD_CONTRATO ct ON ct.NUCONT = f.AD_NUCONT
   WHERE f.RECDESP = 1 AND f.DHBAIXA IS NULL AND f.PROVISAO = 'N'
     AND f.CODEMP IN (${emp})
     -- SO TITULO QUE E BOLETO. Sem esta linha a cobranca alcancava deposito, NF cancelada,
@@ -158,6 +179,10 @@ function avaliarGeravel(t: any, regras: any[]): { geravel: boolean; motivo: stri
   return { geravel: true, motivo: null };
 }
 
+// v5: a ORIGEM do titulo. Ver sql/009_origem_do_titulo.sql para o que o ERP tem e o que
+//     nao tem — em particular: data de entrega NAO existe nestes titulos, e o que existe
+//     e a data de saida da nota, que e outra coisa e vai ser dita como tal.
+
 /* ----------------------------------------------------------------------- main */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -194,6 +219,15 @@ Deno.serve(async (req) => {
           sacado: S(r[19]), sacado_cnpj: digitos(r[20]) || null,
           codtiptit: N(r[21]) || null, tipo_titulo: S(r[22]),
           dtneg: dataIso(r[23]), codctabcoint: N(r[24]) || null, conta_desc: S(r[25]),
+          serie: S(r[26]), parcela: S(r[27]),
+          // No Clube o total NAO vem da nota: o titulo nasce do contrato e NUNOTA e nulo,
+          // entao a contagem por nota volta 0 (visto no contrato 42: parcela "11", nota
+          // nula, PARCTOT 0, QTDPARCELAS 12). Sem este fallback a Nina diria "parcela 11"
+          // sem o "de 12" — que e justamente o que o cliente do Clube quer saber.
+          parcelas_total: N(r[28]) || N(r[32]) || null,
+          dt_emissao: dataIso(r[29]), operacao: S(r[30]),
+          contrato: N(r[31]) || null, contrato_parcelas: N(r[32]) || null,
+          contrato_valor: Number(r[33]) || null, contrato_inicio: dataIso(r[34]),
           atualizado: new Date().toISOString(),
         });
       }
@@ -269,6 +303,25 @@ Deno.serve(async (req) => {
       }
     }
 
+    /* ---- 3b. o status de entrega, quando ele existe ---------------------------------
+       Vem do `entrega_nota` (que o entregas-refresh mantem), nao do ERP: no ERP os campos
+       de entrega desta carteira estao VAZIOS — AD_DTENTREGA e AD_STATUSENTREGA com zero
+       preenchidos em 2.465 titulos, agendamento em 2. Aqui cobre ~22% e so diz "Entregue",
+       sem data. E o suficiente para a Nina confirmar que consta entregue quando o cliente
+       questionar; data de entrega ela nao tem, e nao vai inventar. */
+    const comNota = titulos.filter((t) => t.numnota);
+    for (let i = 0; i < comNota.length; i += 400) {
+      const fatia = comNota.slice(i, i + 400);
+      const { data: ent } = await sb.from("entrega_nota").select("numnota,codparc,status_ent")
+        .in("numnota", fatia.map((t) => t.numnota));
+      const porNota: Record<string, string> = {};
+      for (const e of (ent || [])) {
+        const st = String(e.status_ent || "").trim();
+        if (st) porNota[`${e.numnota}|${e.codparc}`] = st;
+      }
+      for (const t of fatia) { const st = porNota[`${t.numnota}|${t.codparc}`]; if (st) t.entrega_status = st; }
+    }
+
     const { error: eDelT } = await sb.from("cobranca_titulo").delete().neq("nufin", -1); if (eDelT) throw eDelT;
     for (let i = 0; i < titulos.length; i += 500) { const { error } = await sb.from("cobranca_titulo").insert(titulos.slice(i, i + 500)); if (error) throw error; }
 
@@ -307,6 +360,16 @@ Deno.serve(async (req) => {
       melhor_origem: porOrigem,
       sem_contato_nenhum: semContato.length,
       boletos_reaproveitados: titulos.filter((t) => t.boleto_url).length,
+      // de quantos titulos a Nina consegue dizer de onde vieram
+      origem: {
+        // `&& !t.contrato`: no Clube o NUMNOTA vem preenchido com o numero do CONTRATO, e
+        // contar isso como nota fiscal faria a cobertura parecer maior do que e.
+        com_nota: titulos.filter((t) => t.numnota && !t.contrato).length,
+        com_contrato_clube: titulos.filter((t) => t.contrato).length,
+        com_parcela: titulos.filter((t) => t.parcela).length,
+        com_status_entrega: titulos.filter((t) => t.entrega_status).length,
+        sem_origem: titulos.filter((t) => !t.numnota && !t.contrato).length,
+      },
     });
   } catch (e) { return j({ ok: false, erro: detalhar(e) }, 500); }
 });

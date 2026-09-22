@@ -164,6 +164,57 @@ Safra **fora** dessa janela e os demais bancos (Itaú, conta 4) podem gerar norm
 A regra é dado e não código porque tem prazo: quando o período manual do Safra não tiver
 mais título em aberto, é um `UPDATE`, não um deploy.
 
+## A Nina responde, insiste, e sabe quando parar
+
+A cobrança não é mais um disparo sem depois. Quando o cliente responde, a **Nina Financeiro**
+atende; quando ele não responde, ela insiste; e quando o assunto sai do que ela pode resolver,
+a conversa vai para a **Karla** ou a **Bianca** no CRM.
+
+### O que ela resolve sozinha
+
+- manda o boleto / a 2ª via;
+- confirma valor e vencimento;
+- **diz de onde vem a cobrança**: NF e série, *parcela X de Y*, data em que a nota foi
+  emitida — ou, se for Clube, o número do contrato e a parcela;
+- recebe comprovante de pagamento;
+- anota promessa de pagamento (e cala até o dia seguinte à data prometida);
+- aceita um "não quero mais receber" sem insistir.
+
+### O que ela nunca resolve — vira repasse
+
+Prazo, adiar vencimento, parcelar, desconto, abatimento, renegociação. Contestação de valor,
+devolução, nota errada, mercadoria que não chegou, **data de entrega**. Juros, multa,
+protesto, negativação, advogado. Pedido de falar com uma pessoa, reclamação, cliente irritado.
+E qualquer coisa que ela não entendeu.
+
+### A cadência
+
+Cinco toques, e depois uma pessoa. O toque 1 é a cobrança do dia; os toques 2 a 5 saem a cada
+2, 3, 4 e 7 dias úteis. Sem retorno no quinto, a conversa passa para a Karla ou a Bianca.
+Não existe toque 6.
+
+Só dia útil, 9h–18h de São Paulo. Toque que não saiu (instância caída, por exemplo) não conta.
+A dívida é reconferida no Sankhya antes de **cada** toque — cobrar quem já pagou custa mais
+caro do que não cobrar.
+
+### A IA não escreve número
+
+O modelo escreve só o texto; valor, vencimento, NF, parcela e contrato entram por marcador e
+são preenchidos pelo código, lendo o `cobranca_titulo`. Se o modelo escrever um algarismo por
+conta própria, **a mensagem não é enviada** — ela é reescrita uma vez e, se insistir, a
+conversa vai para uma atendente. Um dígito trocado manda o cliente pagar o que não deve.
+
+### Onde acompanhar
+
+```
+/functions/v1/cobranca-painel?aba=conversas
+```
+
+Status de cada conversa, em que toque está, quem prometeu pagar e para quando, quem foi
+repassado e por quê, e as últimas falas dos dois lados.
+
+---
+
 ## Ligar o motor
 
 O motor nasce **desligado**, de propósito.
@@ -184,6 +235,33 @@ update cobranca_config set auto_aprovar = true where id = 1;
 ```
 
 Para parar tudo na hora: `update cobranca_config set ativo = false where id = 1;`
+
+### Ligar o atendimento (é outra chave, de propósito)
+
+Disparar cobrança e deixar um robô conversando são decisões de risco diferente, então são
+duas chaves — não se deve poder tomar as duas sem querer:
+
+```sql
+-- o atendimento da Nina (responder o que o cliente escreveu)
+update cobranca_config set atende_ativo = true where id = 1;
+```
+
+Os jobs no `pg_cron` já estão criados e ativos (`cobranca-atende-10min`,
+`cobranca-seguir-2x-dia`). Enquanto as chaves estiverem `false` eles rodam e as funções
+respondem `409` sem tocar em nada — job criado só "na hora de ligar" é job que alguém esquece.
+
+**Antes de ligar**, veja o que ela responderia sem mandar nada:
+
+```
+POST /functions/v1/cobranca-atende   { "dry": true }
+POST /functions/v1/cobranca-seguir   { "dry": true }
+```
+
+`dry` mostra a resposta gerada, os anexos, o repasse e a promessa que ela reconheceu — e não
+escreve nem envia nada.
+
+Para calar só a conversa, mantendo a cobrança do dia:
+`update cobranca_config set atende_ativo = false where id = 1;`
 
 ### Devolver os contatos que a Nina pegou emprestado
 
@@ -252,12 +330,19 @@ sql/003_cron.sql                         a cadência no pg_cron
 sql/004_tipo_titulo.sql                  só título que é boleto
 sql/005_boleto_geravel.sql               quais não podem ganhar boleto novo
 sql/006_assinatura.sql                   a assinatura das mensagens
+sql/006b_empresa_nome.sql                "Nitron" no corpo e no assunto
+sql/007_nina_financeiro_atendentes.sql   a Nina certa, e Karla/Bianca
+sql/008_conversa.sql                     cobranca_conversa e a cadência
+sql/009_origem_do_titulo.sql             de onde vem o boleto (e o que o ERP não tem)
+sql/010_cron_conversa.sql                os jobs do atendimento e da cadência
 supabase/functions/
   cobranca-titulos-refresh/index.ts      Sankhya → cobranca_titulo + cobranca_contato
   cobranca-boleto/index.ts               orquestra a renderização e o upload
   cobranca-boleto/boleto_pdf.ts          o gerador de PDF, sem dependência
   cobranca-montar/index.ts               monta os cards e escreve as mensagens
   cobranca-aprovar/index.ts              dispara (WhatsApp na fila, e-mail direto)
+  cobranca-atende/index.ts               a Nina lê e responde, dentro do envelope
+  cobranca-seguir/index.ts               a cadência de cinco toques, e o repasse
   cobranca-painel/index.ts               a tela de aprovação
   cobranca-cron/index.ts                 a cadência
 docs/ARQUITETURA.md                      o detalhe técnico

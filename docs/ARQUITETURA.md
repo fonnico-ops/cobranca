@@ -244,6 +244,168 @@ noite no Brasil — o aviso da semana sairia um dia antes, toda semana.
 
 ---
 
+## 9. A Nina Financeiro conversando
+
+Até aqui o motor mandava a cobrança e virava as costas. Quem respondia "manda a 2ª via" ou
+"pago sexta" falava sozinho, e quem **não** respondia nunca mais era lembrado — que é
+exatamente quem se queria cobrar.
+
+Duas funções fecham o ciclo:
+
+| | |
+|---|---|
+| `cobranca-atende` | lê o que o cliente respondeu no GHL e responde, dentro de um envelope estreito |
+| `cobranca-seguir` | insiste enquanto ninguém responde e, no fim, entrega a conversa a uma pessoa |
+
+O estado da conversa vive em `cobranca_conversa`, uma linha por contato do CRM.
+
+### Os quatro limites
+
+Três a gestão pediu. O quarto é o que sustenta os outros.
+
+**1. A Nina só fala em conversa que o motor abriu.** A varredura é de conversas não lidas da
+location — e essa location tem lead de marketing, cliente reclamando de entrega e
+representante, tudo junto. O filtro é a própria tabela `cobranca_conversa`: contato sem linha
+lá não é olhado. Um atendimento que respondesse "toda conversa não lida" responderia lead de
+marketing pela caixa da cobrança, e ninguém descobriria antes do cliente.
+
+**2. Só o operacional.** 2ª via, confirmar valor e vencimento, dizer de onde vem o título,
+receber comprovante, anotar promessa de pagamento. Prazo, parcelamento, desconto, contestação
+de valor, juros, protesto: repassa. Um desconto combinado por robô é dinheiro que não volta.
+
+**3. Repassada é repassada.** Assim que a conversa vai para a Karla ou a Bianca, o robô não
+fala mais nela. Robô e pessoa escrevendo na mesma conversa apaga o trabalho da atendente no
+meio.
+
+**4. A IA não escreve algarismo. Nenhum.** É a regra da casa (o `copiloto-repasse` já faz o
+mesmo com CNPJ) e aqui vale em dobro: a conversa carrega valor, vencimento, NF e linha
+digitável. Um dígito trocado manda o cliente pagar o que não deve — e a conversa vira
+discussão sobre o número em vez de pagamento.
+
+O modelo escreve **só prosa** e pede os números por marcador:
+
+| marcador | o código preenche com |
+|---|---|
+| `[[DIVIDA]]` | a lista dos títulos em aberto, valor e vencimento de cada um |
+| `[[TOTAL]]` | a soma em aberto |
+| `[[ORIGEM]]` | de onde vem cada título (§10) |
+| `[[BOLETO]]` | anexa os PDFs e escreve a frase certa sobre eles |
+
+E `sanear()` confere: **qualquer** algarismo na prosa do modelo reprova a resposta. Uma
+tentativa de reescrever; se reprovar de novo, a conversa vai para uma atendente em vez de
+sair um texto improvisado. Isso é deliberado — mandar um número inventado é pior do que a
+Karla ler a conversa.
+
+Marcadores de controle, que somem do texto: `[[REPASSA:motivo]]`, `[[PROMESSA:AAAA-MM-DD]]`,
+`[[PAGO]]`, `[[PARAR]]`.
+
+### A cadência: cinco toques, depois uma pessoa
+
+O toque 1 é a cobrança do `cobranca-aprovar`, que já nasce gravada em `cobranca_conversa`.
+Os toques 2 a 5 saem do `cobranca-seguir`, com espera crescente
+(`cobranca_config.toques_espera`, hoje `{2,3,4,7,7}` dias). Vencido o quinto, a conversa vai
+para a Karla ou a Bianca. **Não existe toque 6**: robô que insiste para sempre não cobra, só
+treina o cliente a ignorar o número.
+
+Detalhes que não são enfeite:
+
+- **Toque que não saiu não conta.** Uma instância caída por dois dias consumiria o orçamento
+  de cinco toques sem o cliente receber nada — e ele seria repassado a uma atendente que vai
+  perguntar por que ninguém o procurou.
+- **Nunca sábado nem domingo.** `proximoToqueEm()` empurra para o próximo dia útil, e a
+  função ainda confere a janela (seg–sex, 9h–18h em São Paulo) antes de tocar. Cobrança às
+  23h de domingo é o tipo de coisa que faz o cliente bloquear o número.
+- **Promessa cala o robô.** Marcou data, o próximo toque é o dia *seguinte* a ela. Tocar
+  antes é desconfiar na cara de quem acabou de se comprometer.
+- **Quem respondeu sai da cadência de quem sumiu**: próximo toque em uma semana, não em dois
+  dias.
+- **A dívida é reconferida antes de cada toque.** Entre o toque 1 e o 5 passam duas semanas,
+  e cobrar quem já pagou custa mais caro do que não cobrar.
+- **Pediu para parar, para.** `nao_perturbe` faz o `cobranca-montar` pular o grupo nas
+  rodadas seguintes. Cobrar de novo quem pediu para parar é o caminho mais curto para o
+  número ser denunciado — e perder o número custa a carteira inteira, não um cliente.
+
+### O repasse
+
+Três coisas acontecem juntas, nesta ordem:
+
+1. o contato muda de dono no CRM (é assim que a conversa aparece na fila dela);
+2. uma **nota** no contato diz por que ela chegou, com a última fala do cliente. Nota e não
+   tarefa: a nota fica junto da conversa, tarefa vira lista paralela que ninguém abre. Se
+   este passo falhasse, a atendente abriria uma conversa sem contexto — que é como o repasse
+   morre na prática;
+3. `cobranca_conversa.status = 'repassada'`, e o robô perde a permissão de falar.
+
+O rodízio entre Karla e Bianca é por peso **com memória** (`cobranca_atendente.recebidos`):
+sem o contador, sortear a cada repasse concentra numa só em qualquer amostra pequena — e um
+repasse por dia é amostra pequena.
+
+O contato estava *emprestado* à Nina (§2), então o repasse atualiza `dono_depois`. Sem isso o
+`campanha-dono` veria `dono_depois = Nina`, acharia que alguém mexeu por fora, e deixaria o
+contato com a atendente para sempre.
+
+### Supervisão
+
+`cobranca-painel?aba=conversas`: status, toque atual, promessa, quem recebeu o repasse e por
+quê, e as últimas seis falas dos dois lados. Robô que conversa sem tela de supervisão é robô
+que ninguém corrige.
+
+---
+
+## 10. De onde vem o boleto
+
+A primeira pergunta de quem recebe uma cobrança não é *quanto* — é *de que é isso*. Até aqui
+a única resposta possível era o número da NF, e "NF 188412" não diz nada a quem está do outro
+lado. Quem não responde isso perde a conversa: o cliente para de discutir pagamento e passa a
+discutir se a dívida existe.
+
+Medido na carteira de cobrança em 22/09 (1.053 títulos que são boleto, empresas 1/2/14):
+
+| | |
+|---|---|
+| parcela (`TGFFIN.DESDOBRAMENTO`) | 1.052 · 99,9% |
+| nota fiscal + `TGFCAB` | 841 |
+| contrato do Clube (`TGFFIN.AD_NUCONT`) | 211 |
+| sem origem nenhuma | 1 |
+| status de entrega (do `entrega_nota`) | 214 · 20% |
+
+Então a Nina consegue dizer, de praticamente todo título: a NF e a série, **parcela X de Y**,
+a data em que a nota foi emitida — ou, no Clube, o **número do contrato** e a parcela.
+
+### Data de entrega não existe
+
+Foi pedida, e a resposta honesta é que o ERP não tem:
+
+| campo | preenchido |
+|---|---|
+| `TGFCAB.AD_DTENTREGA` | 0 de 2.465 |
+| `TGFCAB.AD_STATUSENTREGA` | 0 de 2.465 |
+| `AD_TSIAGENENT` (agendamento) | 2 de 2.465 |
+| `TGFCAB.DTPREVENT` | 51 de 2.465 (2%) |
+
+O que existe é `TGFCAB.DTENTSAI` — **quando a nota foi emitida / a mercadoria saiu daqui**, e
+isso é outra coisa. O `entrega_nota` do Supabase cobre 20% dos títulos e só diz "Entregue",
+sem data.
+
+Consequência codificada: a Nina diz "nota emitida em DD/MM" e, quando o `entrega_nota`
+afirma, "consta entregue". **Data** de entrega ela não tem, e perguntar isso é repasse.
+Inventar uma data de entrega numa cobrança é entregar ao cliente o argumento para não pagar.
+
+### Duas coisas que só o dado real mostrou
+
+- **No Clube, `TGFFIN.NUMNOTA` vem com o número do contrato, não com uma nota fiscal.**
+  Visto no `nufin` 1509888: `numnota` 42, `contrato` 42. Sem guarda, a mensagem diria "NF 42"
+  e o cliente iria procurar no sistema dele uma nota que não existe. E o total de parcelas do
+  Clube não vem da nota (a contagem por nota volta 0, porque `NUNOTA` é nulo): vem de
+  `AD_CONTRATO.QTDPARCELAS`.
+- **O nome do tipo de operação não vai para o cliente.** `TGFTOP.DESCROPER` é nomenclatura
+  interna: na produção há 15 títulos com *"Venda Reemissão de Nota com Problema"* e 161 com
+  *"Venda Clientes Especiais"*. Mandar isso numa cobrança troca a conversa sobre pagamento
+  por uma conversa sobre o problema da nota, ou sobre que clientes são "especiais". O campo
+  fica guardado em `cobranca_titulo.operacao` para o painel e para a atendente.
+
+---
+
 ## 8. O que ficou de fora, e por quê
 
 **Gerar os boletos que faltam.** Existe a ação `Gerar Boletos Não Gerados`

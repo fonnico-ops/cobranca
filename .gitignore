@@ -6,3 +6,5 @@ testes/montar_puro.*
 testes/boleto.pdf
 testes/boleto.png
 testes/package*.json
+testes/atende_puro.*
+testes/seguir_puro.*

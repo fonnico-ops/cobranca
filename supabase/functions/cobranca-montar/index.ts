@@ -1,4 +1,4 @@
-// cobranca-montar (v5) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v6) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -13,6 +13,7 @@
 // discutindo o numero em vez do pagamento. O modelo e fixo; a variacao e a fase (vencido x a
 // vencer), o tamanho da lista e o que se pode dizer sobre o boleto.
 //
+// v6: respeita quem pediu para nao receber mais (cobranca_conversa.nao_perturbe).
 // v5: o nome da empresa no CORPO vem de cobranca_config.empresa_nome, e e "Nitron". O texto
 //     dizia "aqui na Nitronplast" enquanto a assinatura dizia "Nitron" — duas marcas na
 //     mesma mensagem. A razao social do rodape continua sendo a juridica, que e outra coisa.
@@ -332,6 +333,14 @@ Deno.serve(async (req) => {
     const grupos: Record<string, any[]> = {};
     for (const t of elegiveis) { const g = String(t.matriz || t.codparc); (grupos[g] = grupos[g] || []).push(t); }
 
+    /* ---- quem pediu para parar NAO entra, nunca ----------------------------------
+       O cobranca-atende marca nao_perturbe quando o cliente pede para nao receber mais.
+       Se a rodada de segunda ignorasse isso, o cliente que pediu na sexta seria cobrado de
+       novo tres dias depois — e o caminho mais curto para o numero ser denunciado. Perder
+       o numero custa a carteira inteira, nao um cliente. */
+    const { data: silencio } = await sb.from("cobranca_conversa").select("grupo").eq("nao_perturbe", true);
+    const naoPerturbe = new Set((silencio || []).map((x: any) => String(x.grupo)));
+
     /* ---- quem ja foi cobrado ha pouco nao entra de novo ---- */
     const corte = new Date(Date.now() - REENVIO * 86400000).toISOString().slice(0, 10);
     const { data: recentes } = await sb.from("cobranca_fila")
@@ -354,6 +363,7 @@ Deno.serve(async (req) => {
     const pula = (m: string) => { pulados[m] = (pulados[m] || 0) + 1; };
 
     for (const [g, ts] of Object.entries(grupos)) {
+      if (naoPerturbe.has(g)) { pula("cliente pediu para nao receber mais"); continue; }
       if (cobradoRecente.has(g)) { pula(`cobrado nos ultimos ${REENVIO} dias`); continue; }
       const ordenados = ts.slice().sort((a, b) => String(a.dtvenc).localeCompare(String(b.dtvenc)));
       const total = ordenados.reduce((a, t) => a + Number(t.valor), 0);

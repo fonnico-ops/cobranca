@@ -1,4 +1,4 @@
-// cobranca-aprovar (v1) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
+// cobranca-aprovar (v3) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
 //
 // O QUE ESTA FUNCAO FAZ E NAO FAZ
 //   WhatsApp: escreve em fila_envio e para. Quem manda e o fila-processar, que ja carrega o
@@ -23,6 +23,10 @@
 //   campanha_dono_emprestado com campanha='cobranca', e o `campanha-dono` com
 //   acao:"devolver", campanha:"cobranca" devolve todo mundo. ANOTA ANTES DE TROCAR: se nao
 //   der para registrar de quem era, nada e trocado — foi o erro de 26/08 que custou 9 contatos.
+//
+// v3: abre a CONVERSA (cobranca_conversa). Era um disparo sem depois: quem respondesse
+//     "manda a 2a via" falava sozinho, e quem nao respondesse nunca mais era lembrado.
+//     A linha gravada aqui e o toque 1 — e o cobranca-atende so responde quem tem linha la.
 //
 // POST { ids?: [n], rodada?, fase?, todos?: true, seco?: true, aprovado_por?: "nome" }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -196,6 +200,9 @@ Deno.serve(async (req) => {
 
       const envios: any[] = [];
       const filaIds: number[] = [];
+      // por onde a conversa vai continuar. O WhatsApp ganha do e-mail quando os dois saem:
+      // e onde o cliente responde, e e la que a Nina consegue atender.
+      let conversa: { contact_id: string; canal: string; destino: string } | null = null;
 
       /* ---------- WhatsApp: empresta o contato e enfileira ---------- */
       if (alvoWpp) {
@@ -224,6 +231,7 @@ Deno.serve(async (req) => {
             if (eF) envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo: "fila_envio: " + eF.message, em: new Date().toISOString() });
             else {
               if (linha?.id) filaIds.push(Number(linha.id));
+              conversa = { contact_id: ct.id, canal: "whatsapp", destino: alvoWpp.valor };
               envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: true, fila_id: linha?.id ?? null, anexos: urls.length, em: new Date().toISOString() });
             }
           }
@@ -239,11 +247,41 @@ Deno.serve(async (req) => {
           envios.push({ canal: "email", destino: alvoMail.valor, origem: alvoMail.origem, ok: false, motivo: "nao consegui achar/criar o contato no CRM", em: new Date().toISOString() });
         } else {
           const r = await mandarEmail(g, ct.id, card.assunto || "Nitronplast", card.corpo_email || card.mensagem, urls);
+          if (r.ok && !conversa) conversa = { contact_id: ct.id, canal: "email", destino: alvoMail.valor };
           envios.push({ canal: "email", destino: alvoMail.valor, origem: alvoMail.origem, ok: r.ok, anexos: r.anexos, motivo: r.ok ? undefined : `GHL ${r.status}: ${r.resposta}`, em: new Date().toISOString() });
         }
       }
 
       const algumOk = envios.some((e) => e.ok);
+
+      /* ---- ESTE E O TOQUE 1 ---------------------------------------------------------
+         A partir daqui a conversa existe: o cobranca-atende so responde contato que tem
+         linha aqui (e o filtro que impede a Nina de responder lead de marketing pela caixa
+         da cobranca), e o cobranca-seguir conta os toques a partir deste.
+
+         `upsert` e nao `insert`: o mesmo cliente volta em rodadas seguintes, e recomecar a
+         contagem a cada rodada daria toque infinito — que e exatamente o que os cinco
+         toques existem para impedir. Conversa ja repassada a uma pessoa NAO e reaberta:
+         robo escrevendo por cima da atendente apaga o trabalho dela no meio. */
+      if (algumOk && conversa) {
+        const agora = new Date().toISOString();
+        const { data: jaHa } = await sb.from("cobranca_conversa").select("contact_id,toques,status").eq("contact_id", conversa.contact_id).maybeSingle();
+        if (jaHa?.status === "repassada") {
+          // nada: a conversa e de gente agora
+        } else {
+          await sb.from("cobranca_conversa").upsert({
+            contact_id: conversa.contact_id, grupo: card.grupo, nome: card.nome,
+            canal: conversa.canal, destino: conversa.destino, fase: card.fase,
+            status: "ativa", nao_perturbe: false,
+            toques: Number(jaHa?.toques || 0) + 1, ultimo_toque_em: agora,
+            // o proximo toque cai daqui a dois dias uteis; o cobranca-seguir reescreve
+            // isso a cada toque com a espera da vez (cobranca_config.toques_espera)
+            proximo_toque_em: new Date(Date.now() + 2 * 86400000).toISOString(),
+            atualizado: agora,
+          }, { onConflict: "contact_id" });
+        }
+      }
+
       await sb.from("cobranca_fila").update({
         status: algumOk ? "enfileirado" : "erro",
         motivo: algumOk ? null : (envios.map((e) => `${e.canal}: ${e.motivo}`).join(" | ").slice(0, 300) || "nenhum canal saiu"),
