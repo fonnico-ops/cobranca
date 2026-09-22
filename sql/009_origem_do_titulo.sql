@@ -5,13 +5,23 @@
 -- quem esta do outro lado. Quem nao consegue responder isso perde a conversa: o cliente
 -- para de discutir pagamento e passa a discutir se a divida existe.
 --
--- O QUE O ERP TEM, DE VERDADE (medido em 22/09 sobre os 2.465 titulos da carteira de
--- cobranca — os que sao boleto, vencidos ate 180 dias ou a vencer em 15):
+-- O QUE O ERP TEM, DE VERDADE.
 --
---   DESDOBRAMENTO (a parcela)        2.464  99,9%   -> "parcela 2 de 3"
---   NUMNOTA + TGFCAB                 1.656    67%   -> nota, serie, tipo de operacao, saida
---   AD_NUCONT (contrato do Clube)      397    16%   -> contrato, parcelas, mensalidade
---   sem nota E sem contrato            470    19%   -> ai nao ha origem para dar
+-- Duas medicoes de 22/09, e a diferenca entre elas importa: a primeira varreu todos os
+-- titulos que sao boleto (2.465), sem filtrar empresa; a segunda e a CARTEIRA DE COBRANCA
+-- de fato — empresas 1/2/14, vencidos ate 180 dias ou a vencer em 7 — que e o que o motor
+-- cobra, e onde a cobertura e muito melhor. Os numeros da carteira sao os que valem:
+--
+--   sobre 1.053 titulos da carteira (o refresh mede isso em `origem` a cada rodada):
+--     DESDOBRAMENTO (a parcela)      1.052  99,9%   -> "parcela 2 de 3"
+--     nota fiscal + TGFCAB             841          -> nota, serie, saida
+--     AD_NUCONT (contrato do Clube)    211          -> contrato, parcelas, mensalidade
+--     status de entrega (entrega_nota) 214    20%   -> so "Entregue", sem data
+--     sem origem nenhuma                 1
+--
+-- ATENCAO ao contar "com nota": no Clube o TGFFIN.NUMNOTA vem preenchido com o NUMERO DO
+-- CONTRATO, nao com uma nota fiscal (nufin 1509888: numnota 42, contrato 42). Contar isso
+-- como nota fiscal infla a cobertura, e mandaria o cliente procurar uma nota que nao existe.
 --
 -- E O QUE ELE NAO TEM — a parte que importa registrar, porque foi perguntado:
 --
@@ -21,9 +31,9 @@
 --   TGFCAB.DTPREVENT            51 de 2.465  (2%)
 --
 --   NAO EXISTE data de entrega nestes titulos. O que existe e a DATA DE SAIDA DA NOTA
---   (TGFCAB.DTENTSAI, 1.656 = todas as que tem nota), que e quando a mercadoria saiu
---   daqui — e outra coisa, e e assim que vai ser dita.
---   O `entrega_nota` do Supabase cobre 232 dos 1.058 titulos e so diz "Entregue", sem data.
+--   (TGFCAB.DTENTSAI, preenchida em toda nota), que e quando a mercadoria saiu daqui — e
+--   outra coisa, e e assim que vai ser dita.
+--   O `entrega_nota` do Supabase cobre 20% e so diz "Entregue", sem data.
 --   Entao: quando ele disser "Entregue", a Nina pode confirmar que consta entregue; data
 --   de entrega ela NAO tem, e perguntar isso vira repasse. Inventar uma data de entrega
 --   numa cobranca e dar ao cliente o argumento para nao pagar.
