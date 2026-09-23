@@ -1,4 +1,4 @@
-// cobranca-painel (v2) — a tela de aprovacao, e a tela das conversas. HTML montado no servidor, com a chave de
+// cobranca-painel (v3) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -7,7 +7,11 @@
 //     promessa de pagamento fica so dentro de uma linha de jsonb. Robo que conversa sem
 //     tela de supervisao e robo que ninguem corrige.
 //
+// v3: `?aba=saude` responde "o que saiu, o que nao saiu, e por que" — que e a pergunta que
+//     vem depois de ligar o motor. Sem ela a correcao depende de alguem abrir o SQL.
+//
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
+// GET  ?aba=conversas | ?aba=saude&dias=30
 // POST { acao:"aprovar"|"recusar", ids:[...] } -> repassa ao cobranca-aprovar
 //
 // O que a tela mostra de proposito, antes do botao:
@@ -105,6 +109,7 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
   <button id="todos">Marcar todos</button><button id="nenhum">Desmarcar</button>
   <span style="flex:1"></span>
   <a href="?aba=conversas" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Conversas da Nina &rarr;</a>
+  <a href="?aba=saude" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Saúde &rarr;</a>
   <button id="recusar">Recusar</button>
   <button id="aprovar" class="go">Aprovar e disparar</button>
 </div>
@@ -185,9 +190,268 @@ a.volta{color:var(--ac);text-decoration:none;font-size:13px}
 </style></head><body><div class="wrap">
 <h1>Cobrança — conversas da Nina</h1>
 <div class="sub">${cs.length} conversa(s) · ${conta("ativa")} em cobrança · ${conta("promessa")} com promessa · ${conta("repassada")} com atendente · ${conta("encerrada")} encerradas${ctx.atendeDesligado ? ' · <b style="color:#c60">a Nina nao responde (cobranca_config.atende_ativo = false)</b>' : ""}<br>
-<a class="volta" href="?fase=vencido">&larr; voltar para a aprovação</a></div>
+<a class="volta" href="?fase=vencido">&larr; voltar para a aprovação</a> · <a class="volta" href="?aba=saude">saúde &rarr;</a></div>
 ${cs.length ? linhas : '<div class="vazio-tudo">Nenhuma conversa ainda.<br>Elas nascem quando o <code>cobranca-aprovar</code> dispara o primeiro toque.</div>'}
 </div></body></html>`;
+}
+
+/* ================================================================== a aba da saude
+ * O que esta tela existe para responder, na ordem em que a pergunta aparece:
+ *   1. o motor esta ligado?  (tres chaves separadas, e nenhuma liga sozinha)
+ *   2. o que saiu, e o que NAO saiu?  (por canal, com a causa de cada falha)
+ *   3. quem ficou sem ser cobrado por falta de contato?
+ *   4. que titulo deveria ter boleto e nao tem?
+ *   5. alguma conversa travou — promessa vencida, repasse sem resposta?
+ *
+ * DE ONDE VEM A CAUSA DA FALHA. Ela esta em `fila_envio.resultado`, nao em `fila_envio.erro`
+ * — a coluna `erro` existe e fica sempre nula, em 840 falhas de 30 dias. Quem for mexer aqui
+ * e olhar `erro` vai concluir que o sistema nao registra causa nenhuma, e vai "consertar" o
+ * fila-processar (que e compartilhado com todas as campanhas) sem precisar.
+ *
+ * As causas sao agrupadas por FAMILIA e nao pelo texto cru: "GHL 400: {...traceId:abc}" e
+ * "GHL 400: {...traceId:xyz}" sao a mesma falha e tem de contar como uma linha so, senao a
+ * tela vira uma lista de 840 itens unicos e ninguem corrige nada.
+ */
+// O curinga do PostgREST e `*`, nao `%` — com `%` o filtro casa zero linha e a tela mostra
+// "nenhuma falha" para sempre, que e o pior jeito de um painel de falhas falhar.
+const CAMPANHAS_COBRANCA = "cobranca*";
+
+/**
+ * Reduz o texto do resultado a familia de falha — o que se conserta, nao o que se le.
+ *
+ * AS FAMILIAS VIERAM DOS TEXTOS REAIS, nao de imaginacao: 60 dias de fila_envio, agrupados.
+ * A primeira versao disto foi escrita de cabeca e errava as duas maiores — chamava os 615
+ * "e-mail invalido" e os 16 "unsubscribed" de "o CRM recusou (4xx)", que e verdade e nao
+ * serve para nada, porque os tres se consertam em lugares diferentes. O teste de saude
+ * roda com esses textos reais; se o fila-processar mudar a redacao, ele acusa.
+ *
+ * A ORDEM IMPORTA. As familias especificas vem ANTES do `GHL 4xx` generico — senao o
+ * generico engole todas e a tela volta a dizer "o CRM recusou" 700 vezes.
+ */
+export function familiaDaFalha(texto: string): { chave: string; rotulo: string; conserto: string } {
+  const t = String(texto || "").toLowerCase();
+
+  // --- o que se conserta no CADASTRO do cliente
+  if (/e-?mail is invalid|email is invalid/.test(t))
+    return { chave: "email_invalido", rotulo: "e-mail do contato é inválido", conserto: "corrigir o e-mail no cadastro do Sankhya — o CRM nem tentou enviar" };
+  if (/has unsubscribed|unsubscrib/.test(t))
+    return { chave: "descadastrado", rotulo: "o e-mail se descadastrou", conserto: "esse endereço clicou em descadastrar; cobrar por WhatsApp ou pedir novo e-mail ao cliente" };
+  if (/dnd is active for email|dnd_active_email/.test(t))
+    return { chave: "dnd_email", rotulo: "contato com DND de e-mail no CRM", conserto: "alguém marcou não perturbar no CRM — tirar o DND ou cobrar só por WhatsApp" };
+  if (/dnd is active|dnd_active/.test(t))
+    return { chave: "dnd", rotulo: "contato com DND no CRM", conserto: "tirar o não perturbar no CRM do contato" };
+  if (/achar\/criar contato|achar\/criar o contato/.test(t))
+    return { chave: "sem_contato_crm", rotulo: "não deu para achar nem criar o contato no CRM", conserto: "conferir telefone e e-mail no cadastro do Sankhya" };
+
+  // --- o que se conserta no CRM ou na Zaptos
+  if (/o contato e d[ao] .+ no crm|sairia pelo numero dela/.test(t))
+    return { chave: "dono_errado", rotulo: "o contato é de outra pessoa, a mensagem sairia pelo número errado", conserto: "ajustar o proprietário do contato no CRM — quem é dono decide o número de saída" };
+  if (/instancia desconectada|instance is disconnected/.test(t))
+    return { chave: "wpp_desconectado", rotulo: "o WhatsApp de saída estava desconectado", conserto: "reconectar o número na Zaptos — o CRM aceitou e o aparelho não entregou" };
+  if (/fora do cadastro instancia_ghl/.test(t))
+    return { chave: "instancia_sem_cadastro", rotulo: "instância fora do cadastro instancia_ghl", conserto: "cadastrar a instância em instancia_ghl, ou trocar o dono do contato" };
+  if (/sem instancia|nao roteavel/.test(t))
+    return { chave: "sem_instancia", rotulo: "sem instância de WhatsApp para esse dono", conserto: "o dono do contato no CRM não tem número conectado na Zaptos" };
+  if (/bind nao aceito/.test(t))
+    return { chave: "bind", rotulo: "o CRM não aceitou o vínculo do contato", conserto: "conferir o contato no CRM: costuma ser duplicado ou com telefone em formato estranho" };
+
+  // --- o generico, sempre por ultimo
+  if (/ghl 5\d\d|timeout|fetch failed|network|internal server error/.test(t))
+    return { chave: "ghl_5xx", rotulo: "o CRM ou a rede falhou na hora", conserto: "costuma passar sozinho na próxima rodada; se insistir, é o CRM" };
+  if (/ghl 4\d\d/.test(t))
+    return { chave: "ghl_4xx", rotulo: "o CRM recusou o envio (4xx)", conserto: "ler a mensagem do CRM no exemplo abaixo — quase sempre é dado do contato" };
+  return { chave: "outro", rotulo: "outro", conserto: "ler o texto do erro no exemplo abaixo" };
+}
+
+function paginaSaude(d: any): string {
+  const n = (x: any) => Number(x || 0).toLocaleString("pt-BR");
+  const chave = (ligado: boolean, nome: string, oque: string) =>
+    `<div class="chave ${ligado ? "on" : "off"}"><b>${ligado ? "ligado" : "desligado"}</b> <code>${esc(nome)}</code><span>${esc(oque)}</span></div>`;
+
+  const porCanal = d.envios.map((e: any) => {
+    const total = e.enviado + e.erro + e.fila;
+    const pct = total ? Math.round((e.enviado * 100) / total) : 0;
+    return `<tr><td>${esc(e.canal)}</td><td class="num">${n(e.enviado)}</td>
+      <td class="num ${e.erro ? "ruim" : ""}">${n(e.erro)}</td><td class="num">${n(e.fila)}</td>
+      <td class="num">${total ? pct + "%" : "—"}</td></tr>`;
+  }).join("");
+
+  const falhas = d.falhas.map((f: any) => `<article class="linha">
+      <div class="lcab"><span class="cnt">${n(f.n)}</span>
+        <div><b>${esc(f.rotulo)}</b><div class="mut">${esc(f.conserto)}</div></div>
+        <span class="tag">${esc(f.canais.join(" · "))}</span></div>
+      <pre class="msg">${esc(f.exemplo)}</pre>
+    </article>`).join("");
+
+  const semContato = d.sem_contato.map((g: any) =>
+    `<tr><td>${esc(g.nome || "grupo " + g.grupo)}</td><td class="num">${brl(g.valor)}</td><td>${esc(g.rodada)}</td><td>${esc(g.fase)}</td></tr>`).join("");
+
+  const semBoleto = d.sem_boleto.map((c: any) =>
+    `<tr><td>${esc(c.conta)}</td><td class="num">${n(c.n)}</td><td>${esc(c.nota)}</td></tr>`).join("");
+
+  const travadas = d.travadas.map((c: any) =>
+    `<tr><td>${esc(c.nome || "grupo " + c.grupo)}</td><td>${esc(c.porque)}</td><td>${esc(c.quando)}</td></tr>`).join("");
+
+  const bloco = (titulo: string, corpo: string, vazio: string, cabecalho = "") =>
+    `<section><h2>${titulo}</h2>${corpo ? `<table>${cabecalho}${corpo}</table>` : `<p class="nada">${vazio}</p>`}</section>`;
+
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cobrança — saúde</title><style>
+:root{--bg:#f6f7f9;--fg:#111;--card:#fff;--bd:#e3e5e9;--mut:#666;--ac:#0b5;--ruim:#c0392b}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14161a;--fg:#e9eaec;--card:#1c1f24;--bd:#2a2e35;--mut:#9aa0a8;--ruim:#ff6b5a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}
+.wrap{max-width:940px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 2px}h2{font-size:15px;margin:0 0 8px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:14px}
+section{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:12px 0}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);overflow-wrap:anywhere}
+th{color:var(--mut);font-weight:600;font-size:12px}
+td.num{text-align:right;white-space:nowrap}td.ruim{color:var(--ruim);font-weight:700}
+.nada{color:var(--mut);font-size:13.5px;margin:0}
+.chave{display:flex;gap:8px;align-items:baseline;font-size:13.5px;padding:4px 0;flex-wrap:wrap}
+.chave b{padding:1px 9px;border-radius:99px;color:#fff;font-size:11.5px}
+.chave.on b{background:var(--ac)}.chave.off b{background:#c60}
+.chave code{font-size:12.5px;color:var(--mut)}.chave span{color:var(--mut);font-size:12.5px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.kpi{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:10px 12px}
+.kpi b{display:block;font:700 22px system-ui}.kpi span{color:var(--mut);font-size:12.5px}
+.linha{border:1px solid var(--bd);border-radius:10px;padding:10px;margin:8px 0}
+.lcab{display:flex;gap:10px;align-items:flex-start}
+.cnt{font:700 18px system-ui;min-width:42px;text-align:right;color:var(--ruim)}
+.lcab>div{flex:1;min-width:0}.mut{color:var(--mut);font-size:12.5px}
+.tag{font-size:11px;color:var(--mut);border:1px solid var(--bd);padding:1px 8px;border-radius:99px;white-space:nowrap}
+.msg{white-space:pre-wrap;background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:8px;margin:8px 0 0;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+a.volta{color:var(--ac);text-decoration:none;font-size:13px}
+</style></head><body><div class="wrap">
+<h1>Cobrança — saúde</h1>
+<div class="sub">últimos ${d.dias} dias · <a class="volta" href="?fase=vencido">aprovação</a> · <a class="volta" href="?aba=conversas">conversas</a></div>
+
+<section><h2>As três chaves</h2>
+${chave(d.cfg.ativo, "ativo", "a rodada diária monta e dispara cobrança")}
+${chave(d.cfg.atende, "atende_ativo", "a Nina responde quem escrever de volta")}
+${chave(d.cfg.emitidos, "emitidos_ativo", "o boleto sai no dia em que é registrado no banco")}
+<p class="nada" style="margin-top:8px">Nenhuma liga as outras. Com as três desligadas o sistema só monta a fila e espera aprovação.</p></section>
+
+<section><h2>Boletos</h2><div class="cards">
+<div class="kpi"><b>${n(d.boletos.com_pdf)}</b><span>títulos com PDF pronto</span></div>
+<div class="kpi"><b>${n(d.boletos.com_pix)}</b><span>com QR do PIX no PDF</span></div>
+<div class="kpi"><b>${n(d.boletos.faltando)}</b><span>têm linha digitável e ainda não têm PDF</span></div>
+<div class="kpi"><b>${n(d.boletos.sem_linha)}</b><span>sem linha digitável no ERP</span></div>
+</div>
+<p class="nada" style="margin-top:10px">O QR do PIX só aparece quando o ERP tem o payload em <code>AD_PIXQRCODE</code>. Sem ele a caixa sai em branco, de propósito: um QR inventado manda o dinheiro para a conta errada.</p></section>
+
+${bloco("Envios", porCanal, "Nenhum envio de cobrança ainda — o motor nunca rodou com <code>ativo = true</code>.",
+  "<tr><th>canal</th><th>enviado</th><th>erro</th><th>na fila</th><th>sucesso</th></tr>")}
+
+<section><h2>Falhas, por causa</h2>
+${falhas || '<p class="nada">Nenhuma falha no período.</p>'}</section>
+
+${bloco("Títulos sem boleto no ERP", semBoleto, "Todo título da carteira tem boleto.",
+  "<tr><th>conta</th><th>títulos</th><th>o que isso quer dizer</th></tr>")}
+
+${bloco("Grupos que ficaram sem contato", semContato, "Todo grupo montado tinha ao menos um canal.",
+  "<tr><th>cliente</th><th>valor</th><th>rodada</th><th>fase</th></tr>")}
+
+${bloco("Conversas que pararam", travadas, "Nenhuma conversa travada.",
+  "<tr><th>cliente</th><th>o que aconteceu</th><th>desde</th></tr>")}
+</div></body></html>`;
+}
+
+/** Junta o que a aba da saude mostra. Tudo agregado aqui, em TS: o PostgREST nao agrupa. */
+async function dadosSaude(sb: any, dias: number) {
+  const desde = new Date(Date.now() - dias * 864e5).toISOString();
+
+  const [cfgR, tit, env, cards, convs] = await Promise.all([
+    sb.from("cobranca_config").select("ativo,atende_ativo,emitidos_ativo,boleto_nao_geravel").eq("id", 1).maybeSingle(),
+    sb.from("cobranca_titulo").select("linha_digitavel,boleto_url,pix,conta_desc,codctabcoint,dtneg").limit(5000),
+    sb.from("fila_envio").select("canal,status,resultado,criado_em,campanha,nome")
+      .or(`campanha.like.${CAMPANHAS_COBRANCA},campanha.eq.boleto_emitido`)
+      .gte("criado_em", desde).order("criado_em", { ascending: false }).limit(4000),
+    sb.from("cobranca_fila").select("grupo,nome,valor,rodada,fase,contatos,status,motivo")
+      .gte("criado_em", desde).order("valor", { ascending: false }).limit(600),
+    sb.from("cobranca_conversa").select("*").limit(500),
+  ]);
+  const cfg = cfgR.data || {};
+  const titulos = tit.data || [];
+  const envios = env.data || [];
+
+  /* ---- boletos: o unico numero que conta e o que TEM PDF, porque e o que vai anexo ---- */
+  const comLinha = titulos.filter((t: any) => t.linha_digitavel);
+  const boletos = {
+    com_pdf: comLinha.filter((t: any) => t.boleto_url).length,
+    com_pix: comLinha.filter((t: any) => t.boleto_url && String(t.pix || "").length > 20).length,
+    faltando: comLinha.filter((t: any) => !t.boleto_url).length,
+    sem_linha: titulos.length - comLinha.length,
+  };
+
+  /* ---- envios por canal ---- */
+  const canais = new Map<string, any>();
+  for (const e of envios) {
+    const c = e.canal || "?";
+    if (!canais.has(c)) canais.set(c, { canal: c, enviado: 0, erro: 0, fila: 0 });
+    const linha = canais.get(c);
+    if (e.status === "enviado") linha.enviado++;
+    else if (e.status === "erro") linha.erro++;
+    else if (e.status !== "cancelado") linha.fila++;
+  }
+
+  /* ---- falhas agrupadas por FAMILIA, nao pelo texto cru (ver o comentario la em cima) ---- */
+  const fams = new Map<string, any>();
+  for (const e of envios.filter((x: any) => x.status === "erro")) {
+    const f = familiaDaFalha(e.resultado || "");
+    if (!fams.has(f.chave)) fams.set(f.chave, { ...f, n: 0, canais: new Set<string>(), exemplo: "" });
+    const g = fams.get(f.chave);
+    g.n++; g.canais.add(e.canal || "?");
+    if (!g.exemplo) g.exemplo = String(e.resultado || "").slice(0, 400);
+  }
+  const falhas = [...fams.values()].sort((a, b) => b.n - a.n)
+    .map((g) => ({ ...g, canais: [...g.canais] }));
+
+  /* ---- grupos montados sem nenhum canal: cobranca que nunca teve como sair ---- */
+  const sem_contato = (cards.data || [])
+    .filter((c: any) => !(Array.isArray(c.contatos) ? c.contatos : []).length)
+    .slice(0, 40);
+
+  /* ---- titulo sem boleto: por conta, com o porque que vem da CONFIG e nao de um palpite --- */
+  const regras = Array.isArray(cfg.boleto_nao_geravel) ? cfg.boleto_nao_geravel : [];
+  const contas = new Map<string, any>();
+  for (const t of titulos.filter((x: any) => !x.linha_digitavel)) {
+    const nome = t.conta_desc || "(sem conta)";
+    const regra = regras.find((r: any) =>
+      Number(r.conta) === Number(t.codctabcoint) &&
+      (!r.dtneg_de || String(t.dtneg || "") >= r.dtneg_de) &&
+      (!r.dtneg_ate || String(t.dtneg || "") <= r.dtneg_ate));
+    if (!contas.has(nome)) {
+      contas.set(nome, {
+        conta: nome, n: 0,
+        // sem regra que explique, o titulo DEVERIA ter boleto — e e isso que a tela precisa gritar
+        nota: regra ? regra.motivo : "sem regra que explique — deveria ter boleto e não tem",
+      });
+    }
+    contas.get(nome).n++;
+  }
+  const sem_boleto = [...contas.values()].sort((a, b) => b.n - a.n);
+
+  /* ---- conversa travada: promessa vencida, ou repasse que a atendente nao tocou ---- */
+  const hoje = hojeSp();
+  const travadas = (convs.data || []).flatMap((c: any) => {
+    const saida = [];
+    if (c.status === "promessa" && c.promessa_data && String(c.promessa_data) < hoje)
+      saida.push({ ...c, porque: "prometeu pagar e a data passou", quando: String(c.promessa_data).split("-").reverse().join("/") });
+    if (c.status === "repassada" && c.repassada_em && !c.ultimo_inbound_em)
+      saida.push({ ...c, porque: `passou para ${c.repassada_nome || c.repassada_para} e o cliente não falou mais`, quando: qdo(c.repassada_em) });
+    if (c.status === "ativa" && c.proximo_toque_em && new Date(c.proximo_toque_em) < new Date(Date.now() - 3 * 864e5))
+      saida.push({ ...c, porque: "o próximo toque está atrasado — a rodada não passou por ela", quando: qdo(c.proximo_toque_em) });
+    return saida;
+  }).slice(0, 40);
+
+  return {
+    dias, boletos, falhas, sem_contato, sem_boleto, travadas,
+    envios: [...canais.values()].sort((a, b) => (b.enviado + b.erro) - (a.enviado + a.erro)),
+    cfg: { ativo: cfg.ativo === true, atende: cfg.atende_ativo === true, emitidos: cfg.emitidos_ativo === true },
+  };
 }
 
 Deno.serve(async (req) => {
@@ -214,6 +478,13 @@ Deno.serve(async (req) => {
     }
 
     const { data: cfg } = await sb.from("cobranca_config").select("ativo,instancia,atende_ativo,toques_max").eq("id", 1).maybeSingle();
+
+    if (u.searchParams.get("aba") === "saude") {
+      const dias = Math.max(1, Math.min(365, Number(u.searchParams.get("dias")) || 30));
+      return new Response(paginaSaude(await dadosSaude(sb, dias)), {
+        headers: { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+      });
+    }
 
     if (u.searchParams.get("aba") === "conversas") {
       // ordem por status e nao por data: o que precisa de olho humano (repassada, promessa)

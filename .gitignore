@@ -12,3 +12,4 @@ testes/emitidos_puro.*
 testes/qr.mjs
 testes/boleto_novo.pdf
 testes/boleto_sem_pix.pdf
+testes/painel_puro.*

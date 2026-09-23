@@ -1,4 +1,9 @@
-// cobranca-boleto (v1) — renderiza o PDF da segunda via e hospeda no Storage.
+// cobranca-boleto (v2) — renderiza o PDF da segunda via e hospeda no Storage.
+//
+// v2: o desenho passou a ser o mesmo do ERP (duas vias, grade do Jasper) e ganhou a area
+// do PIX. Por isso o SELECT traz agora `pix`, `parcela`, `serie` e `dtneg`: sem o payload
+// de TGFFIN.AD_PIXQRCODE a caixa do PIX sai VAZIA, que e o combinado — um QR inventado
+// manda o dinheiro para a conta errada.
 //
 // Por que o PDF nasce aqui e nao na hora do envio: o GHL busca o anexo por URL publica,
 // entao o arquivo precisa existir ANTES da mensagem sair. E porque re-renderizar o mesmo
@@ -39,7 +44,7 @@ Deno.serve(async (req) => {
     const refazer = b.refazer === true;
 
     let q = sb.from("cobranca_titulo")
-      .select("nufin,numnota,dtvenc,valor,nossonum,banco,codbco,carteira,agencia,conta,linha_digitavel,codigo_barras,cedente,cedente_cnpj,sacado,sacado_cnpj,boleto_url")
+      .select("nufin,numnota,serie,parcela,dtneg,dtvenc,valor,nossonum,banco,codbco,carteira,agencia,conta,linha_digitavel,codigo_barras,pix,cedente,cedente_cnpj,sacado,sacado_cnpj,boleto_url")
       .not("linha_digitavel", "is", null);
     if (Array.isArray(b.nufins) && b.nufins.length) q = q.in("nufin", b.nufins.map((x: any) => Number(x)).filter(Boolean));
     if (!refazer) q = q.is("boleto_url", null);
