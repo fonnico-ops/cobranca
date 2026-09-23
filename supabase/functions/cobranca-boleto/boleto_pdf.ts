@@ -16,6 +16,8 @@
 // fonte o arquivo fica em ~4 KB e abre em qualquer aparelho. Texto em WinAnsi, que cobre
 // os acentos do portugues.
 
+import { qrMatriz } from "./qr.ts";
+
 const MM = 2.834645669; // 1 mm em pontos PostScript
 const A4_W = 595.28;
 const A4_H = 841.89;
@@ -131,6 +133,71 @@ class Pagina {
     );
   }
 
+  /* ---- primitivas em PONTOS, y de BAIXO para cima ---------------------------------
+     O layout do boleto foi transcrito do template JasperReports que o Sankhya usa, e la
+     as coordenadas sao pontos a partir do rodape. Converter cada uma para mm-do-topo na
+     mao seria 120 oportunidades de errar um numero; entao aqui o sistema de coordenadas
+     e o mesmo do original, e a transcricao fica conferivel linha a linha contra o PDF. */
+  pt(xPt: number, yPt: number, tamanho: number, s: string, negrito = false) {
+    if (s === null || s === undefined || s === "") return;
+    this.ops.push(
+      `BT ${negrito ? "/F2" : "/F1"} ${tamanho} Tf 1 0 0 1 ${xPt.toFixed(2)} ${yPt.toFixed(2)} Tm (${escapaPdf(s)}) Tj ET`,
+    );
+  }
+  /** Texto alinhado a direita de xPt, pela largura real da fonte. */
+  ptDir(xPt: number, yPt: number, tamanho: number, s: string, negrito = false) {
+    this.pt(xPt - larguraMm(s, tamanho, negrito) * MM, yPt, tamanho, s, negrito);
+  }
+  /** Retangulo preenchido, em pontos. Linha fina = retangulo de 0,5pt de altura. */
+  barraPt(xPt: number, yPt: number, wPt: number, hPt: number) {
+    this.ops.push(`${xPt.toFixed(2)} ${yPt.toFixed(2)} ${wPt.toFixed(2)} ${hPt.toFixed(2)} re f`);
+  }
+  hPt(x0: number, x1: number, y: number, esp = 0.5) { this.barraPt(x0, y, x1 - x0, esp); }
+  vPt(x: number, y0: number, y1: number, esp = 0.5) { this.barraPt(x, y0, esp, y1 - y0); }
+  /** Rotulo pequeno em cima, valor embaixo — o par que se repete em todo campo. */
+  campoPt(xPt: number, yPt: number, rotulo: string, valor: string, tam = 8, negrito = false) {
+    this.pt(xPt + 2, yPt + 13, 6, rotulo);
+    this.pt(xPt + 2, yPt + 3, tam, valor, negrito);
+  }
+
+  /**
+   * O QR do PIX. Cada modulo vira um quadradinho; a borda silenciosa fica por conta de
+   * quem chama (o layout do Sankhya reserva 95x95pt e o QR ocupa o miolo).
+   */
+  qrPt(xPt: number, yPt: number, ladoPt: number, matriz: boolean[][]) {
+    const n = matriz.length;
+    const u = ladoPt / n;
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        if (!matriz[y][x]) continue;
+        // +0.15 de sobreposicao: sem isso o antialiasing do leitor deixa uma fresta clara
+        // entre modulos vizinhos e alguns celulares perdem a leitura.
+        this.barraPt(xPt + x * u, yPt + ladoPt - (y + 1) * u, u + 0.15, u + 0.15);
+      }
+    }
+  }
+
+  /** Codigo de barras em PONTOS, no lugar e no tamanho que o layout do Sankhya reserva. */
+  barrasPt(xPt: number, yPt: number, digitos: string, larguraPt: number, alturaPt: number) {
+    const els = itfElementos(digitos);
+    const unidades = els.reduce((a, e) => a + (e === "W" ? 3 : 1), 0);
+    const u = larguraPt / unidades;
+    let x = xPt;
+    els.forEach((e, i) => {
+      const w = (e === "W" ? 3 : 1) * u;
+      if (i % 2 === 0) this.barraPt(x, yPt, w, alturaPt);   // indice par = barra
+      x += w;
+    });
+  }
+
+  /** Linha de corte entre as duas vias, em pontos. */
+  tracejadoPt(xPt: number, yPt: number, wPt: number) {
+    const traco = 6, vao = 4;
+    for (let x = xPt; x < xPt + wPt; x += traco + vao) {
+      this.barraPt(x, yPt, Math.min(traco, xPt + wPt - x), 0.5);
+    }
+  }
+
   linhaH(xMm: number, yMm: number, wMm: number, espMm = 0.2) { this.retangulo(xMm, yMm, wMm, espMm); }
   linhaV(xMm: number, yMm: number, hMm: number, espMm = 0.2) { this.retangulo(xMm, yMm, espMm, hMm); }
 
@@ -208,6 +275,12 @@ export type Titulo = {
   cedente_cnpj?: string | null;
   sacado?: string | null;
   sacado_cnpj?: string | null;
+  // o layout do Sankhya imprime endereco do cedente e do sacado, a parcela e o PIX
+  cedente_endereco?: string | null;
+  sacado_endereco?: string | null;
+  parcela?: string | null;
+  dtneg?: string | null;
+  pix?: string | null;
 };
 
 /**
@@ -223,106 +296,191 @@ export function exigirBoleto(t: Titulo): string | null {
   return null;
 }
 
-/* ------------------------------------------------------------------------- desenho */
+/* ------------------------------------------------------------------------- desenho
+ * O LAYOUT E O DO SANKHYA, transcrito do template JasperReports que ja vai para o cliente
+ * (boleto_template, iText 2.1.7-snk). As coordenadas abaixo sao as do proprio PDF do ERP —
+ * em pontos, y a partir do rodape — extraidas do arquivo, nao estimadas de olho. Assim o
+ * cliente recebe da Nina um documento igual ao que o financeiro imprime no ERP, e nao um
+ * "parecido": num boleto, "parecido" e o que faz o cliente ligar perguntando se e golpe.
+ *
+ * A pagina tem duas vias:
+ *   RECIBO DO PAGADOR      y 618..812
+ *   FICHA DE COMPENSACAO   y 264..481, mais a area do PIX (126..233) e o codigo de barras
+ *
+ * O QR DO PIX ocupa 95x95pt em x=460 y=132 — a mesma caixa que o Sankhya reserva (img4).
+ */
 
-function desenhaFicha(p: Pagina, t: Titulo, topo: number, viaRecibo: boolean) {
-  const X = 15;            // margem esquerda, mm
-  const W = 180;           // largura util
-  const COL = X + W - 42;  // coluna da direita (valores)
-  const banco = String(t.banco || "").trim() || `Banco ${t.codbco ?? ""}`.trim();
-  const codBanco = String(t.codbco ?? "").replace(/\D/g, "");
-  let y = topo;
-
-  /* --- cabecalho: banco, codigo, linha digitavel ---------------------------------
-     Os tres MEDEM antes de se posicionar. A versao anterior punha o codigo do banco num
-     x fixo (X+62) e a linha digitavel alinhada a direita; com 54 caracteres a linha
-     chegava a 77,7 mm e sentava em cima do codigo, em 77 mm. Saiu assim para o cliente:
-     "3419" e "341-9" impressos um sobre o outro, no numero que ele usa para pagar.
-     Agora o codigo vem logo depois do nome, e a linha digitavel encolhe a fonte ate
-     caber no espaco que sobrou — nenhum banco novo pode reintroduzir a colisao. */
-  const nomeBanco = corta(banco, 34);
-  p.texto(X, y, 13, nomeBanco, true);
-  const cod = codBanco ? `${codBanco}-${dvBanco(t)}` : "";
-  const xCod = X + larguraMm(nomeBanco, 13, true) + 4;
-  p.texto(xCod, y, 13, cod, true);
-
-  const digitavel = String(t.linha_digitavel || "").replace(/\s+/g, " ").trim();
-  const sobra = (X + W) - (xCod + larguraMm(cod, 13, true) + 4);
-  let tamLinha = 11;
-  // 6.5pt e o piso: abaixo disso a linha digitavel deixa de ser legivel na tela do
-  // cliente, e ai e melhor ela passar um pouco do que virar um borrao.
-  while (tamLinha > 6.5 && larguraMm(digitavel, tamLinha, true) > sobra) tamLinha -= 0.25;
-  p.textoDir(X + W, y, tamLinha, digitavel, true);
-  y += 6;
-  p.linhaH(X, y, W, 0.5);
-  y += 0.5;
-
-  p.texto(X + 0.8, y + 0.4, 5, viaRecibo ? "Recibo do Sacado" : "Ficha de Compensacao");
-  p.textoDir(X + W - 0.8, y + 0.4, 5, `Titulo ${t.nufin}${t.numnota ? ` · NF ${t.numnota}` : ""}`);
-  y += 4;
-
-  // --- linha 1: cedente / agencia-codigo
-  const h = 8;
-  p.linhaH(X, y, W);
-  p.campo(X, y, "Cedente", corta(t.cedente || "", 58));
-  p.linhaV(COL, y, h);
-  p.campo(COL, y, "Agencia/Codigo cedente", [t.agencia, t.conta].filter(Boolean).join(" / "));
-  y += h;
-
-  // --- linha 2: vencimento / valor
-  p.linhaH(X, y, W);
-  p.campo(X, y, "Data do documento", dataBr(t.dtvenc));
-  p.linhaV(X + 45, y, h);
-  p.campo(X + 45, y, "Nosso numero", String(t.nossonum || "—"));
-  p.linhaV(X + 95, y, h);
-  p.campo(X + 95, y, "Carteira", String(t.carteira || "—"));
-  p.linhaV(COL, y, h);
-  p.texto(COL + 0.8, y + 0.4, 5, "Vencimento");
-  p.textoDir(X + W - 0.8, y + 3.4, 9, dataBr(t.dtvenc), true);
-  y += h;
-
-  // --- linha 3: valor do documento
-  p.linhaH(X, y, W);
-  p.campo(X, y, "Especie", "R$");
-  p.linhaV(X + 45, y, h);
-  p.campo(X + 45, y, "Aceite", "N");
-  p.linhaV(X + 95, y, h);
-  p.campo(X + 95, y, "Documento", String(t.numnota || t.nufin));
-  p.linhaV(COL, y, h);
-  p.texto(COL + 0.8, y + 0.4, 5, "(=) Valor do documento");
-  p.textoDir(X + W - 0.8, y + 3.4, 10, brl(Number(t.valor)), true);
-  y += h;
-
-  // --- instrucoes
-  const hi = 20;
-  p.linhaH(X, y, W);
-  p.texto(X + 0.8, y + 0.4, 5, "Instrucoes (texto de responsabilidade do cedente)");
-  p.texto(X + 0.8, y + 4.6, 7.5, "Pagavel em qualquer banco ou aplicativo, pelo codigo de barras ou pela linha digitavel.");
-  p.texto(X + 0.8, y + 8.2, 7.5, "Apos o vencimento, consulte o valor atualizado antes de pagar.");
-  p.texto(X + 0.8, y + 11.8, 7.5, "Duvidas sobre este titulo: responda a mensagem que trouxe este boleto.");
-  p.texto(X + 0.8, y + 16.4, 6.5, "Segunda via emitida automaticamente a partir do registro do titulo no ERP. Nenhum digito foi recalculado.");
-  p.linhaV(COL, y, hi);
-  y += hi;
-
-  // --- sacado
-  const hs = 11;
-  p.linhaH(X, y, W);
-  p.texto(X + 0.8, y + 0.4, 5, "Sacado");
-  p.texto(X + 0.8, y + 4.0, 8, corta(t.sacado || "", 70));
-  if (t.sacado_cnpj) p.texto(X + 0.8, y + 7.8, 7, "CNPJ/CPF " + doc(t.sacado_cnpj));
-  y += hs;
-  p.linhaH(X, y, W, 0.5);
-  y += 3;
-
-  if (!viaRecibo) {
-    // --- codigo de barras: so na ficha de compensacao, como manda a especificacao
-    p.barras(X, y, String(t.codigo_barras || "").replace(/\D/g, ""));
-    y += 13 + 3;
-    p.texto(X, y, 6, String(t.codigo_barras || "").replace(/\D/g, ""));
-    y += 4;
-  }
-  return y;
+/** Uma faixa horizontal de campos separados por linhas verticais. */
+function faixa(p: Pagina, y: number, alt: number, x0: number, x1: number, divisorias: number[]) {
+  p.hPt(x0, x1, y + alt);
+  for (const x of divisorias) p.vPt(x, y, y + alt);
 }
+
+function cabecalhoVia(p: Pagina, t: Titulo, yTopo: number, banco: string, codBanco: string) {
+  // BANCO | 341-7 | linha digitavel — com as barras verticais do original
+  p.pt(136.9, yTopo, 10, corta(banco, 26), true);
+  p.pt(236.4, yTopo + 0.2, 10, "|");
+  p.pt(241.2, yTopo, 10, codBanco ? `${codBanco}-${dvBanco(t)}` : "", true);
+  p.pt(269.0, yTopo + 0.2, 10, "|");
+  const dig = String(t.linha_digitavel || "").replace(/\s+/g, " ").trim();
+  // a linha digitavel encolhe ate caber entre a barra e a margem direita (563pt)
+  let tam = 8;
+  while (tam > 6 && 287 + larguraMm(dig, tam, false) * MM > 563) tam -= 0.25;
+  p.pt(287, yTopo - 0.9, tam, dig);
+}
+
+/** RECIBO DO PAGADOR — a via que o cliente guarda. Sem codigo de barras, como no original. */
+function viaRecibo(p: Pagina, t: Titulo, banco: string, codBanco: string) {
+  p.pt(467.6, 812.4, 8, "RECIBO DO PAGADOR", true);
+  cabecalhoVia(p, t, 800.5, banco, codBanco);
+  p.hPt(36, 562, 794);
+
+  // faixa 1: beneficiario / CNPJ / sacador avalista / vencimento
+  p.pt(39, 785.6, 6, "Beneficiário");
+  p.pt(299, 785.6, 6, "CNPJ/CPF");
+  p.pt(401, 785.6, 6, "Sacador Avalista");
+  p.pt(490, 786.5, 6, "Vencimento");
+  p.pt(39, 773.6, 8, corta(t.cedente || "", 46));
+  p.pt(299, 773.6, 8, doc(t.cedente_cnpj || ""));
+  p.ptDir(560, 774.6, 8, dataBr(t.dtvenc), true);
+  p.vPt(400, 771, 793); p.vPt(490, 771, 793);
+  p.hPt(36, 562, 770);
+
+  // faixa 2: endereco do beneficiario
+  p.pt(39, 762.6, 6, "Endereço Beneficiário/Sacador Avalista");
+  p.pt(39, 750.6, 8, corta(t.cedente_endereco || "", 92));
+  p.hPt(37, 563, 746);
+
+  // faixa 3: nosso numero / carteira / especie / quantidade / valor / agencia-codigo
+  p.pt(39, 738.5, 6, "Nosso Número");
+  p.pt(146, 737.6, 6, "Carteira");
+  p.pt(201, 737.6, 6, "Espécie");
+  p.pt(245, 736.6, 6, "Quantidade");
+  p.pt(339, 737.6, 6, "Valor");
+  p.pt(435, 738.5, 6, "Agência/Código Beneficiário");
+  p.pt(78, 727.6, 8, nossoNumero(t));
+  p.pt(163, 727.6, 8, String(t.carteira || ""));
+  p.pt(213, 726.6, 8, "DM");
+  p.pt(510, 725.6, 8, agenciaConta(t));
+  faixa(p, 723, 23, 37, 563, [144, 196, 242, 334, 432]);
+
+  // faixa 4: datas, numero do documento, aceite, valor
+  p.pt(37, 713.6, 6, "Data do Documento");
+  p.pt(145, 714.6, 6, "Número do Documento");
+  p.pt(243, 714.6, 6, "Espécie Doc.");
+  p.pt(338, 714.6, 6, "Aceite");
+  p.pt(370, 714.6, 6, "Data Processamento");
+  p.pt(466, 713.6, 6, "Valor do Documento");
+  p.pt(37, 703.6, 8, dataBr(t.dtneg || t.dtvenc));
+  p.pt(147, 704.6, 8, numeroDocumento(t));
+  p.pt(344, 704.6, 8, "N");
+  p.pt(368, 702.6, 8, dataBr(hoje()));
+  p.ptDir(560, 702.6, 8, brl(Number(t.valor)), true);
+  faixa(p, 700, 22, 37, 563, [144, 242, 334, 364, 460]);
+
+  // autenticacao mecanica
+  p.vPt(378, 677, 693); p.hPt(378, 565, 692);
+  p.pt(448, 682.6, 6, "Autenticação Mecânica");
+  p.hPt(36, 562, 618);
+}
+
+/** FICHA DE COMPENSACAO — a via do banco, com codigo de barras e PIX. */
+function viaCompensacao(p: Pagina, t: Titulo, banco: string, codBanco: string, qr: boolean[][] | null) {
+  cabecalhoVia(p, t, 481.5, banco, codBanco);
+  p.hPt(34, 563, 476);
+
+  p.pt(38, 465.6, 6, "Local do Pagamento");
+  p.pt(38, 451.7, 8, "EM QUALQUER BANCO OU CORRESP. NÃO BANCÁRIO MESMO APÓS O VENCIMENTO");
+  p.pt(466, 467.5, 6, "Vencimento");
+  p.ptDir(560, 452.6, 8, dataBr(t.dtvenc), true);
+  p.vPt(464, 264, 476);
+  p.hPt(34, 563, 434);
+
+  p.pt(38, 425.6, 6, "Beneficiário");
+  p.pt(343, 426.6, 6, "CNPJ/CPF");
+  p.pt(467, 428.5, 6, "Agência/Código");
+  p.pt(38, 414.6, 8, corta(t.cedente || "", 52));
+  p.pt(343, 414.6, 8, doc(t.cedente_cnpj || ""));
+  p.pt(498, 415.6, 8, agenciaConta(t));
+  p.hPt(33, 562, 410);
+
+  p.pt(36, 401.6, 6, "Data do Documento");
+  p.pt(142, 401.6, 6, "Número do Documento");
+  p.pt(252, 400.6, 6, "Esp.Doc.");
+  p.pt(345, 400.6, 6, "Aceite");
+  p.pt(377, 400.6, 6, "Data Processamento");
+  p.pt(467, 402.5, 6, "Nosso Número");
+  p.pt(36, 391.6, 8, dataBr(t.dtneg || t.dtvenc));
+  p.pt(144, 391.6, 8, numeroDocumento(t));
+  p.pt(287, 391.6, 8, "DM");
+  p.pt(354, 391.6, 8, "N");
+  p.pt(378, 391.6, 8, dataBr(hoje()));
+  p.pt(498, 390.6, 8, nossoNumero(t));
+  faixa(p, 386, 24, 33, 562, [136, 252, 342, 372]);
+
+  p.pt(36, 376.6, 6, "Uso do Banco");
+  p.pt(143, 376.6, 6, "Carteira");
+  p.pt(200, 376.6, 6, "Espécie");
+  p.pt(256, 377.6, 6, "Quantidade");
+  p.pt(378, 377.6, 6, "Valor");
+  p.pt(467, 379.5, 6, "(=) Valor do Documento");
+  p.pt(158, 365.6, 8, String(t.carteira || ""));
+  p.pt(221, 365.6, 8, "R$");
+  p.ptDir(560, 366.6, 8, brl(Number(t.valor)), true);
+  faixa(p, 360, 26, 33, 562, [136, 198, 252, 372]);
+
+  // instrucoes + a coluna de abatimento/mora/acrescimos
+  p.pt(38, 349.6, 6, "Instruções de responsabilidade do BENEFICIÁRIO. Qualquer dúvida sobre este boleto, responda a mensagem que o trouxe.");
+  p.pt(467, 354.5, 6, "(-) Desconto/Abatimento");
+  p.hPt(465, 563, 336);
+  p.pt(467, 329.5, 6, "(+) Mora/Multa");
+  p.hPt(465, 563, 316);
+  p.pt(467, 307.5, 6, "(+) Outros Acréscimos");
+  p.hPt(465, 563, 290);
+  p.pt(467, 281.5, 6, "(=) Valor Cobrado");
+  p.pt(38, 289.6, 8, "COBRANÇA ESCRITURAL");
+  p.hPt(33, 562, 264);
+
+  // pagador
+  p.pt(36, 258.4, 6, `Pagador  ${corta(t.sacado || "", 58)}   ${doc(t.sacado_cnpj || "")}`);
+  if (t.sacado_endereco) p.pt(36, 251.4, 6, corta(t.sacado_endereco, 92));
+  p.pt(36, 237.5, 6, "Sacador/Avalista");
+
+  /* ---- a area do PIX ------------------------------------------------------------
+     A caixa e sempre desenhada, como no original. O QR so aparece quando o ERP tem o
+     payload em TGFFIN.AD_PIXQRCODE — que hoje e o caso em 104 dos 1.355 titulos. Sem
+     payload a caixa fica VAZIA, por decisao da gestao: um QR inventado manda o dinheiro
+     para a conta errada, e um QR "de exemplo" e pior ainda porque parece valido. */
+  p.hPt(33, 563, 233); p.hPt(33, 563, 126);
+  p.vPt(33, 126, 233); p.vPt(563, 126, 233);
+  if (qr) {
+    p.pt(43, 219.6, 8, "PIX Copia e Cola", true);
+    const pix = String(t.pix || "");
+    // o payload em duas linhas, como no original — o cliente copia daqui quando o QR falha
+    p.pt(41, 199.6, 7, pix.slice(0, 88));
+    p.pt(41, 190.3, 7, pix.slice(88, 176));
+    if (pix.length > 176) p.pt(41, 181.0, 7, pix.slice(176));
+    p.qrPt(460, 132, 95, qr);
+  }
+
+  // codigo de barras: 523x36pt em x=36 y=61, o mesmo lugar do original
+  p.barrasPt(36, 61, String(t.codigo_barras || "").replace(/\D/g, ""), 523, 36);
+  p.pt(365.9, 110.6, 8, "Autenticação Mecânica / FICHA DE COMPENSAÇÃO");
+}
+
+const hoje = () => new Date().toISOString().slice(0, 10);
+/** "109/00044258-6" — carteira, nosso numero e o DV que o ERP ja calculou. */
+function nossoNumero(t: Titulo): string {
+  const nn = String(t.nossonum || "").replace(/\D/g, "");
+  if (!nn) return "—";
+  // o formato do Itau: 3 da carteira + 8 do nosso numero + 1 de DV
+  if (nn.length >= 12) return `${nn.slice(0, 3)}/${nn.slice(3, 11)}-${nn.slice(11)}`;
+  return String(t.nossonum || "");
+}
+const agenciaConta = (t: Titulo) => [t.agencia, t.conta].filter(Boolean).join("/") || "—";
+const numeroDocumento = (t: Titulo) => t.numnota
+  ? `${t.numnota}${t.parcela ? " - " + String(t.parcela).replace(/^0+/, "") : ""}`
+  : String(t.nufin);
 
 /** O DV do codigo do banco vive no 4o digito do codigo de barras — nao e calculado aqui. */
 function dvBanco(t: Titulo): string {
@@ -339,11 +497,22 @@ export function gerarBoletoPdf(t: Titulo): Uint8Array {
   if (erro) throw new Error("boleto nao emitido: " + erro);
 
   const p = new Pagina();
-  let y = 18;
-  y = desenhaFicha(p, t, y, true);   // recibo do sacado
-  y += 6;
-  p.tracejado(15, y - 3, 180);
-  desenhaFicha(p, t, y + 2, false);  // ficha de compensacao, com o codigo de barras
+  const banco = String(t.banco || "").trim() || `Banco ${t.codbco ?? ""}`.trim();
+  const codBanco = String(t.codbco ?? "").replace(/\D/g, "");
+
+  /* O QR so existe se o ERP tiver o payload. Sem ele a area do PIX fica vazia — decisao
+     da gestao, e a unica defensavel: um QR inventado manda dinheiro para a conta errada.
+     Se o payload vier corrompido, o boleto sai SEM o PIX em vez de nao sair: o codigo de
+     barras continua valendo, e um boleto sem PIX ainda se paga. */
+  let qr: boolean[][] | null = null;
+  const pix = String(t.pix || "").trim();
+  if (pix.length > 20) {
+    try { qr = qrMatriz(pix); } catch { qr = null; }
+  }
+
+  viaRecibo(p, t, banco, codBanco);
+  p.tracejadoPt(33, 500, 530);
+  viaCompensacao(p, t, banco, codBanco, qr);
 
   const conteudo = p.ops.join("\n");
   const bytesConteudo = latin1(conteudo);

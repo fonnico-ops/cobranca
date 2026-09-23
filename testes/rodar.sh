@@ -22,7 +22,9 @@ for (const fn of ["cobranca-atende","cobranca-seguir","cobranca-emitidos"]) {
   fs.writeFileSync(fn.replace("cobranca-","")+"_puro.ts", t.slice(0, t.indexOf("Deno.serve(")).replace(/^import .*$/gm,""));
 }'
 
-$ESB ../supabase/functions/cobranca-boleto/boleto_pdf.ts --format=esm --outfile=boleto_pdf.mjs --log-level=error
+# --bundle: o boleto_pdf importa ./qr.ts. O Deno resolve isso sozinho em producao;
+# aqui o esbuild precisa embutir, senao o teste procura um .ts que o Node nao le.
+$ESB ../supabase/functions/cobranca-boleto/boleto_pdf.ts --bundle --format=esm --outfile=boleto_pdf.mjs --log-level=error
 $ESB ../supabase/functions/cobranca-boleto/qr.ts --format=esm --outfile=qr.mjs --log-level=error
 $ESB montar_puro.ts  --format=esm --outfile=montar_puro.mjs  --log-level=error
 $ESB atende_puro.ts  --format=esm --outfile=atende_puro.mjs  --log-level=error

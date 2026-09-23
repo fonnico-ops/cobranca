@@ -1,5 +1,7 @@
 import { gerarBoletoPdf, itfElementos, exigirBoleto, larguraMm } from "./boleto_pdf.mjs";
 import { writeFileSync } from "node:fs";
+import jsQR from "jsqr";
+import { qrMatriz } from "./qr.mjs";
 
 let falhas = 0;
 const ok = (c, m) => { if (c) console.log("  ok   " + m); else { console.log("  FALHA " + m); falhas++; } };
@@ -89,7 +91,10 @@ ok(!Buffer.from(comAcento).includes(Buffer.from([0xc3, 0x83])), "nao vazou seque
 /* ---- 5. escape de parenteses, que quebraria a string do PDF ---- */
 console.log("5) escape");
 const t3 = Buffer.from(gerarBoletoPdf({ ...bom, sacado: "LOJA (MATRIZ) \\ FILIAL" })).toString("latin1");
-ok(t3.includes("(LOJA \\(MATRIZ\\) \\\\ FILIAL)"), "parenteses e barra escapados");
+// o nome do sacado agora sai dentro da linha "Pagador ...", como no layout do Sankhya —
+// entao o teste confere a PROPRIEDADE (escapou) e nao a string isolada de antes.
+ok(t3.includes("LOJA \\(MATRIZ\\) \\\\ FILIAL"), "parenteses e barra escapados");
+ok(!/\(Pagador[^)\\]*\(MATRIZ/.test(t3), "nenhum parentese cru sobrou dentro da string do PDF");
 
 /* ============================================================ nada pode atropelar nada
    O defeito de 22/09: o codigo do banco era desenhado num x FIXO (77 mm) e a linha
@@ -166,6 +171,90 @@ console.log("N+1) larguras da Helvetica batem com o AFM");
   const real = larguraMm(digi, 11, true);
   const media = digi.length * 11 * 0.56 / MM;
   ok(real < media - 7, `a media antiga superestimava em ${(media - real).toFixed(1)}mm (real ${real.toFixed(1)}, media ${media.toFixed(1)})`);
+}
+
+/* ============================================================ o QR sai LEGIVEL do PDF
+   O teste do qr.teste.mjs prova que o codificador acerta a matriz. Isto aqui prova a
+   outra metade, que e onde um erro passaria sem ninguem ver: que os retangulos que o
+   PDF realmente desenha, no lugar e no tamanho que o layout do Sankhya reserva, ainda
+   formam um QR que um leitor independente decodifica. Entre a matriz e o papel estao a
+   troca de eixo (o PDF conta o y de baixo para cima), a escala de 95pt e a sobreposicao
+   de 0,15pt em cada modulo — qualquer um dos tres estraga a leitura em silencio.
+
+   O leitor aqui e o jsQR, o mesmo algoritmo da camera do cliente. Nao ha reimplementacao
+   minha no caminho: o teste le o byte do PDF e pergunta ao jsQR o que ele ve. */
+console.log("N+2) o QR do PIX volta legivel do PDF gerado");
+{
+  const PIX = "00020101021226770014BR.GOV.BCB.PIX2555api.itau/pix/qr/v2/0d2df1cd-cadf-41d3-96f8-4479ac6d19be5204000053039865802BR5911NITRONPLAST6009GUARULHOS62070503***6304E4A1";
+  // a caixa que o layout do Sankhya reserva para o QR (img4 do Jasper): 95x95pt em 460,132
+  const CX = 460, CY = 132, LADO = 95;
+
+  /** Le os `x y w h re f` do stream e devolve so os que caem dentro da caixa do QR. */
+  function retangulosDoQr(pdf) {
+    const txt = Buffer.from(pdf).toString("latin1");
+    // A folga e generosa de proposito (40pt): o teste de vazamento abaixo so tem valor se
+    // um modulo fora do lugar CHEGAR aqui em vez de ser filtrado fora. Modulo tem ~2,1pt;
+    // o que passa de 20 e regua do formulario ou barra do codigo de barras, nao modulo.
+    return [...txt.matchAll(/([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) re f/g)]
+      .map((m) => ({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] }))
+      .filter((r) => r.w < 20 && r.h < 20 &&
+                     r.x >= CX - 40 && r.y >= CY - 40 &&
+                     r.x + r.w <= CX + LADO + 40 && r.y + r.h <= CY + LADO + 40);
+  }
+
+  /** Pinta os retangulos numa imagem RGBA, virando o eixo y como faz a impressora. */
+  function rasteriza(rets, esc = 8, borda = 32) {
+    const lado = Math.round(LADO * esc) + borda * 2;
+    const data = new Uint8ClampedArray(lado * lado * 4).fill(255);
+    for (const r of rets) {
+      const x0 = Math.round((r.x - CX) * esc) + borda;
+      const x1 = Math.round((r.x + r.w - CX) * esc) + borda;
+      // y do PDF cresce para cima; y da imagem cresce para baixo
+      const y0 = Math.round((CY + LADO - (r.y + r.h)) * esc) + borda;
+      const y1 = Math.round((CY + LADO - r.y) * esc) + borda;
+      for (let y = Math.max(0, y0); y < Math.min(lado, y1); y++) {
+        for (let x = Math.max(0, x0); x < Math.min(lado, x1); x++) {
+          const p = (y * lado + x) * 4;
+          data[p] = 0; data[p + 1] = 0; data[p + 2] = 0;
+        }
+      }
+    }
+    return { data, lado };
+  }
+
+  const comPix = gerarBoletoPdf({ ...bom, pix: PIX });
+  const rets = retangulosDoQr(comPix);
+  const escuros = qrMatriz(PIX).flat().filter(Boolean).length;
+  ok(rets.length === escuros,
+     `o PDF desenha um retangulo por modulo escuro da matriz (${rets.length} de ${escuros})`);
+  const { data, lado } = rasteriza(rets);
+  const lido = jsQR(data, lado, lado);
+  ok(!!lido, "o jsQR encontra um QR na caixa reservada pelo Sankhya");
+  ok(lido && lido.data === PIX,
+     lido ? (lido.data === PIX ? `payload de ${PIX.length} bytes volta identico do PDF`
+                              : `VOLTOU DIFERENTE: ${lido.data.slice(0, 40)}...`)
+          : "nada para comparar");
+
+  // o QR nao pode escapar da caixa: se vazar, cobre o codigo de barras ou o valor cobrado
+  const fora = rets.filter((r) => r.x < CX - 0.01 || r.y < CY - 0.01 ||
+                                  r.x + r.w > CX + LADO + 0.2 || r.y + r.h > CY + LADO + 0.2);
+  ok(fora.length === 0, `nenhum modulo passa dos 95x95pt da caixa (${fora.length} fora)`);
+
+  // ... e sem payload a caixa fica VAZIA. Um QR inventado paga a conta errada; um QR
+  // "de exemplo" e pior, porque parece valido. A caixa e a moldura continuam desenhadas.
+  const semPix = gerarBoletoPdf({ ...bom, pix: "" });
+  ok(retangulosDoQr(semPix).length === 0, "sem payload, nenhum modulo e desenhado");
+  const tSem = Buffer.from(semPix).toString("latin1");
+  ok(!tSem.includes("PIX Copia e Cola"), "sem payload, nem o rotulo do PIX aparece");
+  ok(/33\.00 126\.00 530\.00 0\.50 re f/.test(tSem) || tSem.includes("126.00"),
+     "a moldura da area do PIX continua desenhada, como no original");
+
+  // payload curto demais para ser um PIX de verdade tambem nao vira QR
+  ok(retangulosDoQr(gerarBoletoPdf({ ...bom, pix: "00020126" })).length === 0,
+     "payload curto demais nao vira QR");
+
+  writeFileSync("boleto_novo.pdf", comPix);
+  writeFileSync("boleto_sem_pix.pdf", semPix);
 }
 
 console.log(falhas ? `\n${falhas} FALHA(S)` : "\nTodos os testes passaram.");
