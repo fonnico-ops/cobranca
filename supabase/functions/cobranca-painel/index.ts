@@ -286,6 +286,9 @@ function paginaSaude(d: any): string {
   const semContato = d.sem_contato.map((g: any) =>
     `<tr><td>${esc(g.nome || "grupo " + g.grupo)}</td><td class="num">${brl(g.valor)}</td><td>${esc(g.rodada)}</td><td>${esc(g.fase)}</td></tr>`).join("");
 
+  const pendentes = d.boletos_pendentes.map((t: any) =>
+    `<tr><td>${esc(t.nufin)}</td><td>${esc(String(t.dtvenc).split("-").reverse().join("/"))}</td><td class="num">${brl(t.valor)}</td><td>${esc(t.conta)}</td><td>${esc(t.porque)}</td></tr>`).join("");
+
   const semBoleto = d.sem_boleto.map((c: any) =>
     `<tr><td>${esc(c.conta)}</td><td class="num">${n(c.n)}</td><td>${esc(c.nota)}</td></tr>`).join("");
 
@@ -348,6 +351,9 @@ ${bloco("Envios", porCanal, "Nenhum envio de cobrança ainda — o motor nunca r
 <section><h2>Falhas, por causa</h2>
 ${falhas || '<p class="nada">Nenhuma falha no período.</p>'}</section>
 
+${bloco("Têm linha digitável e não viraram PDF", pendentes, "Todo título com linha digitável já tem PDF.",
+  "<tr><th>nufin</th><th>vence</th><th>valor</th><th>conta</th><th>por quê</th></tr>")}
+
 ${bloco("Títulos sem boleto no ERP", semBoleto, "Todo título da carteira tem boleto.",
   "<tr><th>conta</th><th>títulos</th><th>o que isso quer dizer</th></tr>")}
 
@@ -359,32 +365,78 @@ ${bloco("Conversas que pararam", travadas, "Nenhuma conversa travada.",
 </div></body></html>`;
 }
 
+/* O PostgREST devolve NO MAXIMO 1000 linhas por resposta, e `.limit(5000)` nao levanta esse
+   teto — ele so o abaixa. A primeira versao desta tela contava os titulos em memoria com um
+   select unico e mostrou "938 boletos prontos" quando a carteira tinha 1167: os 169 que
+   faltavam eram silencio, nao erro. Um painel que subnotifica e pior do que painel nenhum,
+   porque ninguem desconfia de um numero que apareceu.
+
+   Entao: quantidade vem de COUNT no banco, e lista vem paginada. */
+
+/** Quantas linhas o filtro tem, contadas pelo Postgres — sem trazer nenhuma. */
+async function quantas(q: any): Promise<number> {
+  const { count, error } = await q;
+  if (error) throw error;
+  return Number(count || 0);
+}
+
+/** Traz todas as linhas do filtro, de 1000 em 1000, com um teto para nao varrer a tabela. */
+async function todas(monta: (de: number, ate: number) => any, teto = 6000): Promise<any[]> {
+  const saida: any[] = [];
+  for (let de = 0; de < teto; de += 1000) {
+    const { data, error } = await monta(de, de + 999);
+    if (error) throw error;
+    const lote = data || [];
+    saida.push(...lote);
+    if (lote.length < 1000) break;
+  }
+  return saida;
+}
+
 /** Junta o que a aba da saude mostra. Tudo agregado aqui, em TS: o PostgREST nao agrupa. */
 async function dadosSaude(sb: any, dias: number) {
   const desde = new Date(Date.now() - dias * 864e5).toISOString();
+  const tit = () => sb.from("cobranca_titulo");
+  const cnt = { count: "exact" as const, head: true };
 
-  const [cfgR, tit, env, cards, convs] = await Promise.all([
+  const [cfgR, com_pdf, com_pix, faltando, sem_linha] = await Promise.all([
     sb.from("cobranca_config").select("ativo,atende_ativo,emitidos_ativo,boleto_nao_geravel").eq("id", 1).maybeSingle(),
-    sb.from("cobranca_titulo").select("linha_digitavel,boleto_url,pix,conta_desc,codctabcoint,dtneg").limit(5000),
-    sb.from("fila_envio").select("canal,status,resultado,criado_em,campanha,nome")
-      .or(`campanha.like.${CAMPANHAS_COBRANCA},campanha.eq.boleto_emitido`)
-      .gte("criado_em", desde).order("criado_em", { ascending: false }).limit(4000),
-    sb.from("cobranca_fila").select("grupo,nome,valor,rodada,fase,contatos,status,motivo")
-      .gte("criado_em", desde).order("valor", { ascending: false }).limit(600),
-    sb.from("cobranca_conversa").select("*").limit(500),
+    quantas(tit().select("nufin", cnt).not("linha_digitavel", "is", null).not("boleto_url", "is", null)),
+    // o PDF so desenha o QR com payload de verdade (>20 bytes); o PostgREST nao filtra por
+    // tamanho, e hoje o menor payload da carteira tem 180 bytes — `nao vazio` basta e nao mente
+    quantas(tit().select("nufin", cnt).not("boleto_url", "is", null).not("pix", "is", null).neq("pix", "")),
+    quantas(tit().select("nufin", cnt).not("linha_digitavel", "is", null).is("boleto_url", null)),
+    quantas(tit().select("nufin", cnt).is("linha_digitavel", null)),
   ]);
   const cfg = cfgR.data || {};
-  const titulos = tit.data || [];
-  const envios = env.data || [];
+  const boletos = { com_pdf, com_pix, faltando, sem_linha };
 
-  /* ---- boletos: o unico numero que conta e o que TEM PDF, porque e o que vai anexo ---- */
-  const comLinha = titulos.filter((t: any) => t.linha_digitavel);
-  const boletos = {
-    com_pdf: comLinha.filter((t: any) => t.boleto_url).length,
-    com_pix: comLinha.filter((t: any) => t.boleto_url && String(t.pix || "").length > 20).length,
-    faltando: comLinha.filter((t: any) => !t.boleto_url).length,
-    sem_linha: titulos.length - comLinha.length,
-  };
+  /* As listas sao curtas por natureza — so o que esta fora do lugar entra nelas. */
+  const [pend, semLinha, envios, cards, convs] = await Promise.all([
+    todas((de, ate) => tit().select("nufin,dtvenc,valor,codigo_barras,conta_desc")
+      .not("linha_digitavel", "is", null).is("boleto_url", null).order("dtvenc").range(de, ate), 1000),
+    todas((de, ate) => tit().select("codctabcoint,conta_desc,dtneg")
+      .is("linha_digitavel", null).range(de, ate), 3000),
+    todas((de, ate) => sb.from("fila_envio").select("canal,status,resultado")
+      .or(`campanha.like.${CAMPANHAS_COBRANCA},campanha.eq.boleto_emitido`)
+      .gte("criado_em", desde).order("criado_em", { ascending: false }).range(de, ate)),
+    todas((de, ate) => sb.from("cobranca_fila").select("grupo,nome,valor,rodada,fase,contatos")
+      .gte("criado_em", desde).order("valor", { ascending: false }).range(de, ate), 2000),
+    todas((de, ate) => sb.from("cobranca_conversa").select("*").range(de, ate), 2000),
+  ]);
+
+  /* ---- os que TEM linha digitavel e mesmo assim nao viraram PDF -------------------
+     Nao adianta a tela dizer so "faltam 2": o que se corrige e o MOTIVO. Hoje os dois
+     casos reais sao titulo com valor zerado no ERP (o codigo de barras ainda carrega o
+     valor original, mas o saldo aberto e zero) — e boleto de R$ 0,00 nao se emite. */
+  const boletos_pendentes = pend.slice(0, 30).map((t: any) => ({
+    nufin: t.nufin, dtvenc: t.dtvenc, valor: t.valor, conta: t.conta_desc || "—",
+    porque: !(Number(t.valor) > 0)
+      ? "valor zerado no ERP — boleto de R$ 0,00 não se emite"
+      : (String(t.codigo_barras || "").replace(/\D/g, "").length !== 44
+        ? "código de barras não tem 44 dígitos no ERP"
+        : "recusado na geração — ver a resposta do cobranca-boleto"),
+  }));
 
   /* ---- envios por canal ---- */
   const canais = new Map<string, any>();
@@ -410,14 +462,14 @@ async function dadosSaude(sb: any, dias: number) {
     .map((g) => ({ ...g, canais: [...g.canais] }));
 
   /* ---- grupos montados sem nenhum canal: cobranca que nunca teve como sair ---- */
-  const sem_contato = (cards.data || [])
+  const sem_contato = cards
     .filter((c: any) => !(Array.isArray(c.contatos) ? c.contatos : []).length)
     .slice(0, 40);
 
   /* ---- titulo sem boleto: por conta, com o porque que vem da CONFIG e nao de um palpite --- */
   const regras = Array.isArray(cfg.boleto_nao_geravel) ? cfg.boleto_nao_geravel : [];
   const contas = new Map<string, any>();
-  for (const t of titulos.filter((x: any) => !x.linha_digitavel)) {
+  for (const t of semLinha) {
     const nome = t.conta_desc || "(sem conta)";
     const regra = regras.find((r: any) =>
       Number(r.conta) === Number(t.codctabcoint) &&
@@ -436,7 +488,7 @@ async function dadosSaude(sb: any, dias: number) {
 
   /* ---- conversa travada: promessa vencida, ou repasse que a atendente nao tocou ---- */
   const hoje = hojeSp();
-  const travadas = (convs.data || []).flatMap((c: any) => {
+  const travadas = convs.flatMap((c: any) => {
     const saida = [];
     if (c.status === "promessa" && c.promessa_data && String(c.promessa_data) < hoje)
       saida.push({ ...c, porque: "prometeu pagar e a data passou", quando: String(c.promessa_data).split("-").reverse().join("/") });
@@ -448,7 +500,7 @@ async function dadosSaude(sb: any, dias: number) {
   }).slice(0, 40);
 
   return {
-    dias, boletos, falhas, sem_contato, sem_boleto, travadas,
+    dias, boletos, falhas, sem_contato, sem_boleto, travadas, boletos_pendentes,
     envios: [...canais.values()].sort((a, b) => (b.enviado + b.erro) - (a.enviado + a.erro)),
     cfg: { ativo: cfg.ativo === true, atende: cfg.atende_ativo === true, emitidos: cfg.emitidos_ativo === true },
   };
