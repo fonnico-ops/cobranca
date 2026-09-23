@@ -13,3 +13,5 @@ testes/qr.mjs
 testes/boleto_novo.pdf
 testes/boleto_sem_pix.pdf
 testes/painel_puro.*
+testes/titulos-refresh_puro.*
+testes/refresh_puro.mjs

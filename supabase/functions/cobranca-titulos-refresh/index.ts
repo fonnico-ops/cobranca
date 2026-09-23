@@ -1,4 +1,4 @@
-// cobranca-titulos-refresh (v5) — espelha do Sankhya os titulos abertos que interessam a
+// cobranca-titulos-refresh (v6) — espelha do Sankhya os titulos abertos que interessam a
 // cobranca (vencidos + a vencer na janela) e resolve PARA QUEM mandar cada um.
 //
 // Duas escritas, duas tabelas:
@@ -82,12 +82,32 @@ const dataIso = (x: any) => {
   return null;
 };
 
+/**
+ * TRES fases, desde 23/09 — e a terceira existe por um motivo estreito.
+ *
+ * 'futuro' e o boleto recem-impresso que vence longe. Ele entra no espelho para o
+ * cobranca-emitidos poder entrega-lo no dia em que nasceu; mas NAO pode virar 'a_vencer',
+ * senao o lembrete de sexta ("vence na proxima semana") passaria a avisar sobre vencimento
+ * de daqui a um ano. O cobranca-montar le so 'vencido' e 'a_vencer', entao ignora 'futuro'
+ * sozinho, sem precisar saber que ele existe.
+ *
+ * `dias` e TRUNC(SYSDATE) - TRUNC(DTVENC): positivo = atrasado, negativo = falta vencer.
+ * O dia do vencimento (dias = 0) e 'a_vencer': ainda da tempo de pagar.
+ *
+ * Ver sql/013_boleto_na_impressao.sql.
+ */
+export function faseDoTitulo(dias: number, janelaDias: number): "vencido" | "a_vencer" | "futuro" {
+  if (dias > 0) return "vencido";
+  return -dias <= janelaDias ? "a_vencer" : "futuro";
+}
+
 /* ------------------------------------------------------------------------ SQL */
-const SQL_TITULOS = (emp: string, tipos: string, dias: number, atrasoMax: number, off: number) => `
+const SQL_TITULOS = (emp: string, tipos: string, dias: number, atrasoMax: number, impressao: number, off: number) => `
 SELECT NUFIN, CODPARC, MATRIZ, CODEMP, NUMNOTA, DTVENC, DIAS, VLR, NOSSONUM, CODBCO, NOMEBCO,
        CARTEIRA, CODAGE, CODCTABCO, LINHADIG, CODBARRA, PIXQR, CEDENTE, CEDCNPJ, SACADO, SACCNPJ,
        CODTIPTIT, DESCTIPTIT, DTNEG, CODCTABCOINT, CONTADESC,
-       SERIE, PARCELA, PARCTOT, DTEMISSAO, OPERACAO, CONTRATO, CONTPARC, CONTVLR, CONTINI
+       SERIE, PARCELA, PARCTOT, DTEMISSAO, OPERACAO, CONTRATO, CONTPARC, CONTVLR, CONTINI,
+       DTIMPRESSAO
 FROM (
   SELECT f.NUFIN NUFIN, f.CODPARC CODPARC, NVL(p.CODPARCMATRIZ,0) MATRIZ, f.CODEMP CODEMP,
          f.NUMNOTA NUMNOTA, TO_CHAR(f.DTVENC,'YYYY-MM-DD') DTVENC,
@@ -112,7 +132,12 @@ FROM (
          TO_CHAR(cab.DTENTSAI,'YYYY-MM-DD') DTEMISSAO, top.DESCROPER OPERACAO,
          -- Clube: o titulo nao tem nota, tem contrato. Sao 397 dos 2.465.
          f.AD_NUCONT CONTRATO, ct.QTDPARCELAS CONTPARC, ct.VLRMENSAL CONTVLR,
-         TO_CHAR(ct.DTINIVIGENCIA,'YYYY-MM-DD') CONTINI
+         TO_CHAR(ct.DTINIVIGENCIA,'YYYY-MM-DD') CONTINI,
+         -- QUANDO O BOLETO NASCEU. E o gatilho do cobranca-emitidos, e nao tem substituto:
+         -- AD_DTLIBBOLETO, AD_STATUSBOLETO e TIMDTIMPBOL estao zerados nesta base, e
+         -- NUMREMESSA so tem 6%. DH_IMPRESSAO tem 72% no universo a vencer e 100% nos dias
+         -- recentes. Nao confundir com DTNEG (negociacao) nem com DTVENC.
+         TO_CHAR(f.DH_IMPRESSAO,'YYYY-MM-DD') DTIMPRESSAO
   FROM TGFFIN f
   JOIN TGFPAR p ON p.CODPARC = f.CODPARC AND p.TIPPESSOA = 'J'
   LEFT JOIN TSIEMP e ON e.CODEMP = f.CODEMP
@@ -130,7 +155,15 @@ FROM (
     -- compensacao contabil, PDD e debito de funcionario: 871 titulos e R$ 5,5M que nao se
     -- cobra por mensagem. Ver o comentario de cobranca_config.tipos_titulo.
     AND f.CODTIPTIT IN (${tipos})
-    AND f.DTVENC < TRUNC(SYSDATE) + ${dias + 1}
+    -- DUAS PORTAS, e nao uma. A primeira e a carteira que se cobra: vencido ate o teto de
+    -- atraso, mais o que vence na proxima semana. A segunda e o boleto RECEM-IMPRESSO, que
+    -- pode vencer daqui a um ano e mesmo assim precisa sair hoje — ver 013_boleto_na_impressao.
+    -- Sem esta segunda porta o cobranca-emitidos nunca via um boleto nascer: via um titulo
+    -- entrar na janela de sete dias, e chamava isso de "registrado agora".
+    AND (
+      f.DTVENC < TRUNC(SYSDATE) + ${dias + 1}
+      OR f.DH_IMPRESSAO >= TRUNC(SYSDATE) - ${impressao}
+    )
     AND TRUNC(SYSDATE) - TRUNC(f.DTVENC) <= ${atrasoMax}
     -- intra-grupo fora: cobrar a propria holding por CNPJ que e nosso nao e cobranca
     AND NOT EXISTS (
@@ -195,6 +228,9 @@ Deno.serve(async (req) => {
     const TIPOS = (cfg?.tipos_titulo?.length ? cfg.tipos_titulo : [4, 55]).map((x: any) => Number(x) || 0).filter(Boolean);
     if (!TIPOS.length) throw new Error("cobranca_config.tipos_titulo vazio \u2014 sem tipo de titulo nao ha o que cobrar");
     const REGRAS_BOLETO = Array.isArray(cfg?.boleto_nao_geravel) ? cfg.boleto_nao_geravel : [];
+    // dias de DH_IMPRESSAO para tras. O cobranca-emitidos le o MESMO numero da config: se os
+    // dois divergirem, ele procura titulo que este refresh nao trouxe e a entrega some calada.
+    const IMPRESSAO = Math.max(0, Number(cfg?.emitidos_janela_dias ?? 5));
 
     const base = (Deno.env.get("SANKHYA_URL") || "").replace(/\/$/, "");
     const sess = await login(base, Deno.env.get("SANKHYA_USER")!, Deno.env.get("SANKHYA_PASS")!);
@@ -202,7 +238,7 @@ Deno.serve(async (req) => {
     /* ---- 1. titulos ---- */
     const titulos: any[] = [];
     for (let off = 0; off < 100000; off += 2000) {
-      const rows = await query(base, sess, SQL_TITULOS(EMPRESAS.join(","), TIPOS.join(","), DIAS, ATRASO_MAX, off));
+      const rows = await query(base, sess, SQL_TITULOS(EMPRESAS.join(","), TIPOS.join(","), DIAS, ATRASO_MAX, IMPRESSAO, off));
       for (const r of rows) {
         const dtvenc = dataIso(r[5]);
         if (!dtvenc) continue;                        // sem vencimento nao se cobra nada
@@ -211,7 +247,7 @@ Deno.serve(async (req) => {
         titulos.push({
           nufin: N(r[0]), codparc: N(r[1]), matriz: matriz > 0 ? matriz : null, codemp: N(r[3]),
           numnota: N(r[4]) || null, dtvenc, dias_atraso: dias, valor: Number(r[7]) || 0,
-          fase: dias > 0 ? "vencido" : "a_vencer",
+          fase: faseDoTitulo(dias, DIAS),
           nossonum: S(r[8]), codbco: N(r[9]) || null, banco: S(r[10]),
           carteira: S(r[11]), agencia: S(r[12]), conta: S(r[13]),
           linha_digitavel: S(r[14]), codigo_barras: digitos(r[15]) || null, pix: S(r[16]),
@@ -228,6 +264,7 @@ Deno.serve(async (req) => {
           dt_emissao: dataIso(r[29]), operacao: S(r[30]),
           contrato: N(r[31]) || null, contrato_parcelas: N(r[32]) || null,
           contrato_valor: Number(r[33]) || null, contrato_inicio: dataIso(r[34]),
+          dt_impressao: dataIso(r[35]),
           atualizado: new Date().toISOString(),
         });
       }

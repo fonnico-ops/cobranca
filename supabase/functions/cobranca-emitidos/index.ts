@@ -1,4 +1,4 @@
-// cobranca-emitidos (v1) — o boleto chega quando ele NASCE, nao uma semana antes de vencer.
+// cobranca-emitidos (v2) — o boleto chega quando ele NASCE, nao uma semana antes de vencer.
 //
 // O PROBLEMA QUE ISTO RESOLVE
 //   O motor de cobranca so olha para quem esta vencido ou vence na proxima semana. Entao um
@@ -13,11 +13,26 @@
 //   pega titulo A VENCER. O que ja venceu e assunto do cobranca-montar, e mandar os dois
 //   seria cobrar duas vezes o mesmo titulo no mesmo dia.
 //
-// COMO ELA SABE O QUE E NOVO
-//   Nao por data do ERP. O `AD_HYAKRECSITUACAO` tem os estados do registro mas so 0,8% de
-//   preenchimento, e o refresh APAGA e reescreve o cobranca_titulo inteiro todo dia — entao
-//   qualquer marca dentro dele se perde. O controle vive fora: `boleto_entregue`, um NUFIN
-//   por linha. Manda o que tem boleto_url e nao esta la. Idempotente por construcao.
+// COMO ELA SABE O QUE E NOVO — v2, e esta e a correcao que importa
+//   DUAS CONDICOES, e nao uma. A data de impressao do boleto no ERP (TGFFIN.DH_IMPRESSAO,
+//   espelhada em `dt_impressao`) diz que ele NASCEU ha pouco; o livro `boleto_entregue`, um
+//   NUFIN por linha, diz que ele ainda nao saiu. Idempotente por construcao.
+//
+//   A v1 tinha so a segunda condicao, e filtrava por `fase = 'a_vencer'`. Parecia equivalente
+//   e nao era: o espelho so puxava `DTVENC < hoje + 8`, entao a funcao nunca via um boleto
+//   nascer — via um titulo ENTRAR na janela de sete dias. Na hora de ligar, 129 clientes iam
+//   receber "saiu o boleto da sua compra, estou mandando assim que ele foi registrado no
+//   banco, para nao chegar em cima do vencimento" sobre boletos impressos ha ate onze meses,
+//   vencendo em dois dias. A mensagem afirmaria o contrario do que tinha acontecido.
+//
+//   Por que DH_IMPRESSAO: medido em 23/09 no universo a vencer das empresas 1/2/4/14, tipos
+//   4 e 55 — 10.282 titulos. AD_DTLIBBOLETO, AD_STATUSBOLETO e TIMDTIMPBOL: zero preenchidos.
+//   NUMREMESSA: 6%. DH_IMPRESSAO: 72%, e 100% nos dias recentes, com 60 a 200 por dia util e
+//   vencimentos de poucos dias a mais de um ano — que e a definicao de "nasceu hoje".
+//
+//   A JANELA mora em `cobranca_config.emitidos_janela_dias` porque o refresh le o mesmo
+//   numero para decidir o que traz do ERP. Se os dois divergirem, esta funcao procura titulo
+//   que o espelho nao trouxe e a entrega para de acontecer sem ninguem notar.
 //
 // A PRIMEIRA EXECUCAO E UM BACKFILL
 //   Sem isso a estreia mandaria ~1.170 titulos de uma vez. `{"backfill":true}` marca tudo
@@ -185,12 +200,16 @@ Deno.serve(async (req) => {
     const NOME_INST = String(cfg?.instancia || "Nina Financeiro");
     const FORCAR = cfg?.forcar_instancia !== false;
 
-    /* ---- o que tem boleto e ainda nao foi entregue ---------------------------------
-       `fase = 'a_vencer'`: o que ja venceu e do cobranca-montar. Mandar dos dois lados
-       faria o cliente receber duas mensagens sobre o mesmo titulo no mesmo dia, uma
-       cobrando e outra so entregando — e a segunda desmontaria a primeira. */
+    /* ---- o que NASCEU ha pouco, tem boleto, e ainda nao foi entregue -----------------
+       `dt_impressao >= hoje - janela`: e o que faz a mensagem ser verdade. Ver o cabecalho.
+       `fase != 'vencido'`: o que ja venceu e do cobranca-montar. Mandar dos dois lados faria
+       o cliente receber duas mensagens sobre o mesmo titulo no mesmo dia, uma cobrando e
+       outra so entregando — e a segunda desmontaria a primeira. */
+    const JANELA = Math.max(0, Number(cfg?.emitidos_janela_dias ?? 5));
+    const desde = new Date(Date.now() - JANELA * 864e5).toISOString().slice(0, 10);
     const { data: comBoleto, error: eT } = await sb.from("cobranca_titulo").select("*")
-      .not("boleto_url", "is", null).eq("fase", "a_vencer").limit(3000);
+      .not("boleto_url", "is", null).neq("fase", "vencido")
+      .gte("dt_impressao", desde).limit(3000);
     if (eT) throw eT;
 
     const { data: jaEntregues } = await sb.from("boleto_entregue").select("nufin").limit(20000);
@@ -199,7 +218,7 @@ Deno.serve(async (req) => {
 
     if (backfill) {
       // marca sem mandar: e a virada da rotina, para a estreia nao despejar a carteira toda
-      if (dry) return j({ ok: true, dry: true, backfill: true, marcaria: novos.length });
+      if (dry) return j({ ok: true, dry: true, backfill: true, marcaria: novos.length, janela_dias: JANELA, impresso_desde: desde });
       for (let i = 0; i < novos.length; i += 500) {
         const { error } = await sb.from("boleto_entregue").upsert(
           novos.slice(i, i + 500).map((t: any) => ({ nufin: t.nufin, grupo: t.matriz || t.codparc, canal: "backfill", backfill: true })),
@@ -355,6 +374,7 @@ Deno.serve(async (req) => {
 
     return j({
       ok: true, dry,
+      janela_dias: JANELA, impresso_desde: desde,
       boletos_novos: novos.length, grupos: Object.keys(grupos).length, teto: CAP,
       entregues, pulados,
       restaram: Math.max(0, Object.keys(grupos).length - CAP),
