@@ -263,8 +263,14 @@ Deno.serve(async (req) => {
       const texto = textoEmitidos({ nome, titulos: ord, total, empresa: EMPRESA, assinatura: ASSIN });
 
       if (dry) {
+        // o item do dry leva o e-mail montado e as URLs, e nao so o texto: e dele que o
+        // cobranca-teste manda para um destino de teste, com o MESMO conteudo que iria
+        // para o cliente. Remontar por fora seria testar outra coisa.
         itens.push({ grupo, nome: ord[0]?.sacado, titulos: ord.length, valor: total, anexos: urls.length,
-          whatsapp: alvoWpp?.valor ?? null, email: alvoMail?.valor ?? null, texto });
+          whatsapp: alvoWpp?.valor ?? null, email: alvoMail?.valor ?? null, texto,
+          assunto: `${EMPRESA} — boleto${ord.length > 1 ? "s" : ""} da sua compra (${brl(total)})`,
+          corpo_email: html(texto, ord.map((t: any) => ({ url: t.boleto_url, dtvenc: t.dtvenc, valor: t.valor })).filter((x: any) => x.url)),
+          urls });
         entregues++;
         continue;
       }

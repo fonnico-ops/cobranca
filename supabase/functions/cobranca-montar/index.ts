@@ -501,7 +501,15 @@ Deno.serve(async (req) => {
         valor: Math.round(escolhidos.reduce((a, c) => a + c.valor, 0)),
         sem_contato: escolhidos.filter((c) => c.status === "sem_contato").length,
         pulados,
-        amostra: escolhidos.slice(0, 3).map((c) => ({ grupo: c.grupo, nome: c.nome, valor: c.valor, titulos: c.n_titulos, boletos: c.boletos.length, sem_boleto: c.sem_boleto, contatos: c.contatos.slice(0, 3), mensagem: c.mensagem })),
+        // A amostra leva o card INTEIRO (assunto, corpo do e-mail, boletos), e nao so um
+        // resumo. E dela que o cobranca-teste tira o que manda para um destino de teste:
+        // se aqui viesse um resumo, o teste teria de remontar o texto por fora e deixaria
+        // de testar o texto de producao — que e a unica coisa que ele existe para testar.
+        amostra: escolhidos.slice(0, 3).map((c) => ({
+          grupo: c.grupo, nome: c.nome, valor: c.valor, titulos: c.n_titulos,
+          sem_boleto: c.sem_boleto, contatos: c.contatos.slice(0, 3),
+          mensagem: c.mensagem, assunto: c.assunto, corpo_email: c.corpo_email, boletos: c.boletos,
+        })),
       });
     }
 

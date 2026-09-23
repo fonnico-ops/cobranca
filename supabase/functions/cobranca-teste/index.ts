@@ -1,4 +1,4 @@
-// cobranca-teste (v1) — manda uma cobranca REAL para um destino SEU, antes de ligar o motor.
+// cobranca-teste (v2) — manda uma mensagem REAL do motor para um destino SEU, antes de ligar.
 //
 // POR QUE E UMA FUNCAO SEPARADA, E NAO UM `teste: true` NO cobranca-aprovar
 //   Um modo de teste dentro da funcao que dispara para clientes e exatamente o tipo de
@@ -23,9 +23,24 @@
 //
 // FUNCIONA COM O MOTOR DESLIGADO. E o ponto: serve para conferir ANTES de ligar.
 //
+// v2: OS TRES TIPOS DE MENSAGEM, e nao so a cobranca de vencido.
+//   O motor fala com o cliente de tres jeitos, e ate aqui so um deles dava para conferir
+//   antes de ligar — justamente o unico que ja tinha card gravado em cobranca_fila. Os
+//   outros dois so existem no instante em que a rotina roda.
+//   A saida NAO foi copiar o texto para ca. Foi pedir a PREVIA para quem escreve o texto:
+//     a_vencer -> cobranca-montar  { fase:"a_vencer", seco:true }
+//     emitido  -> cobranca-emitidos{ dry:true }
+//   As duas ja sabiam montar a mensagem sem mandar nada; agora devolvem o card inteiro
+//   (assunto, corpo do e-mail, boletos) em vez de um resumo. Assim o que voce recebe no
+//   teste e byte a byte o que o cliente receberia — e nao uma segunda versao do texto,
+//   que envelheceria sozinha na primeira vez que alguem mexesse na producao.
+//   Nenhuma das duas ganhou destino de override: quem manda para fora continua sendo so
+//   esta funcao, que sem `email`/`whatsapp` nao faz nada.
+//
 // POST {
+//   tipo?: "vencido" | "a_vencer" | "emitido",   // padrao: vencido (o card da fila)
 //   grupo?: 62180,          // codparc da matriz; ou
-//   id?: 123,              // id do card em cobranca_fila
+//   id?: 123,              // id do card em cobranca_fila (so no tipo vencido)
 //   fase?: "vencido" | "a_vencer",
 //   email?: "voce@...",
 //   whatsapp?: "5511999999999",
@@ -99,22 +114,71 @@ Deno.serve(async (req) => {
     const { data: cfg } = await sb.from("cobranca_config").select("*").eq("id", 1).maybeSingle();
     const NOME_INST = String(cfg?.instancia || "Nina Financeiro");
 
-    /* ---- o card: o mesmo que o painel mostraria ---- */
-    let q = sb.from("cobranca_fila").select("*");
-    if (b.id) q = q.eq("id", Number(b.id));
-    else if (b.grupo) q = q.eq("grupo", Number(b.grupo));
-    else q = q.order("valor", { ascending: false });
-    if (b.fase) q = q.eq("fase", String(b.fase));
-    const { data: cards, error } = await q.order("rodada", { ascending: false }).limit(1);
-    if (error) throw error;
-    const card = (cards || [])[0];
-    if (!card) return j({ ok: false, erro: "nenhum card em cobranca_fila com esse filtro — rode o cobranca-montar primeiro" }, 404);
+    const tipo = String(b.tipo || "vencido");
+    if (!["vencido", "a_vencer", "emitido"].includes(tipo)) {
+      return j({ ok: false, erro: `tipo "${tipo}" desconhecido — use vencido, a_vencer ou emitido` }, 400);
+    }
+
+    /* ---- o card. De onde ele vem depende do tipo, mas o formato e sempre o mesmo, e o
+           resto desta funcao nao precisa saber a diferenca. ---- */
+    let card: any;
+    let origem: string;
+
+    if (tipo === "vencido") {
+      // ja existe gravado: e o mesmo card que o painel mostra para aprovacao
+      let q = sb.from("cobranca_fila").select("*");
+      if (b.id) q = q.eq("id", Number(b.id));
+      else if (b.grupo) q = q.eq("grupo", Number(b.grupo));
+      else q = q.order("valor", { ascending: false });
+      // com `id` nao filtra fase: o id ja e unico, e filtrar so criaria um 404 confuso
+      if (b.fase) q = q.eq("fase", String(b.fase));
+      else if (!b.id) q = q.eq("fase", "vencido");
+      const { data: cards, error } = await q.order("rodada", { ascending: false }).limit(1);
+      if (error) throw error;
+      card = (cards || [])[0];
+      if (!card) return j({ ok: false, erro: "nenhum card em cobranca_fila com esse filtro — rode o cobranca-montar primeiro" }, 404);
+      origem = "cobranca_fila";
+    } else {
+      /* Nao existe card gravado: a rotina monta a mensagem na hora e manda. Entao pedimos
+         a PREVIA a ela mesma — o modo que ja existia para conferir sem disparar. */
+      const alvo = tipo === "a_vencer" ? "cobranca-montar" : "cobranca-emitidos";
+      const corpo = tipo === "a_vencer" ? { fase: "a_vencer", seco: true } : { dry: true, limite: 40 };
+      const r = await fetch(Deno.env.get("SUPABASE_URL")! + "/functions/v1/" + alvo, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + srvKey(), "Content-Type": "application/json" },
+        body: JSON.stringify(corpo),
+      });
+      const previa = await r.json().catch(() => ({}));
+      if (!previa?.ok) return j({ ok: false, erro: `o ${alvo} nao devolveu previa`, resposta: previa }, 502);
+
+      const lista: any[] = tipo === "a_vencer"
+        ? (previa.amostra || [])
+        : (previa.itens || []).filter((i: any) => !i.pulou);
+      if (!lista.length) {
+        return j({ ok: true, nada: tipo === "a_vencer"
+          ? "nenhum titulo a vencer na janela de hoje — nao ha mensagem para mostrar"
+          : "nenhum boleto novo desde a ultima entrega — nao ha mensagem para mostrar",
+          previa }, 200);
+      }
+      const esc = b.grupo ? lista.find((i: any) => Number(i.grupo) === Number(b.grupo)) : null;
+      const it = esc || lista[0];
+
+      card = tipo === "a_vencer"
+        ? { id: null, grupo: it.grupo, nome: it.nome, fase: "a_vencer", valor: it.valor,
+            n_titulos: it.titulos, mensagem: it.mensagem, assunto: it.assunto,
+            corpo_email: it.corpo_email, boletos: it.boletos || [] }
+        : { id: null, grupo: Number(it.grupo), nome: it.nome, fase: "emitido", valor: it.valor,
+            n_titulos: it.titulos, mensagem: it.texto, assunto: it.assunto,
+            corpo_email: it.corpo_email, boletos: (it.urls || []).map((u: string) => ({ url: u })) };
+      origem = alvo + (tipo === "a_vencer" ? " (seco)" : " (dry)");
+    }
 
     const boletos: any[] = Array.isArray(card.boletos) ? card.boletos : [];
     const urls = boletos.map((x: any) => String(x.url)).filter((u: string) => /^https?:\/\//i.test(u));
 
     if (seco) {
-      return j({ ok: true, seco: true, card: { id: card.id, grupo: card.grupo, nome: card.nome, fase: card.fase, valor: card.valor, titulos: card.n_titulos },
+      return j({ ok: true, seco: true, tipo, origem,
+        card: { id: card.id, grupo: card.grupo, nome: card.nome, fase: card.fase, valor: card.valor, titulos: card.n_titulos },
         destinos: { email, whatsapp: wpp }, boletos_anexos: urls.length, assunto: card.assunto, mensagem_whatsapp: card.mensagem });
     }
 
@@ -159,6 +223,7 @@ Deno.serve(async (req) => {
     return j({
       ok: feito.some((f) => f.ok),
       aviso: "TESTE: nada foi enviado ao cliente, o card segue 'aguardando' e nenhuma conversa foi aberta",
+      tipo, origem,
       card: { id: card.id, grupo: card.grupo, nome: card.nome, fase: card.fase, valor: card.valor, titulos: card.n_titulos, rodada: card.rodada },
       boletos_anexos: urls.length,
       instancia: NOME_INST,
