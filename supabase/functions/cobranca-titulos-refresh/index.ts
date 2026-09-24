@@ -1,4 +1,4 @@
-// cobranca-titulos-refresh (v6) — espelha do Sankhya os titulos abertos que interessam a
+// cobranca-titulos-refresh (v7) — espelha do Sankhya os titulos abertos que interessam a
 // cobranca (vencidos + a vencer na janela) e resolve PARA QUEM mandar cada um.
 //
 // Duas escritas, duas tabelas:
@@ -232,6 +232,12 @@ Deno.serve(async (req) => {
     // dois divergirem, ele procura titulo que este refresh nao trouxe e a entrega some calada.
     const IMPRESSAO = Math.max(0, Number(cfg?.emitidos_janela_dias ?? 5));
 
+    /* A MARCA DA RODADA. Um unico timestamp para todas as linhas desta execucao — e o que
+       separa "veio agora do ERP" de "sobrou da rodada passada". Toda linha gravada leva
+       `atualizado = marca`; no fim, o que ficou com `atualizado < marca` e o que o ERP nao
+       devolveu mais, e so esse e apagado. Ver o bloco 3 para o porque. */
+    const marca = new Date().toISOString();
+
     const base = (Deno.env.get("SANKHYA_URL") || "").replace(/\/$/, "");
     const sess = await login(base, Deno.env.get("SANKHYA_USER")!, Deno.env.get("SANKHYA_PASS")!);
 
@@ -265,7 +271,13 @@ Deno.serve(async (req) => {
           contrato: N(r[31]) || null, contrato_parcelas: N(r[32]) || null,
           contrato_valor: Number(r[33]) || null, contrato_inicio: dataIso(r[34]),
           dt_impressao: dataIso(r[35]),
-          atualizado: new Date().toISOString(),
+          /* Estes tres sao preenchidos MAIS ABAIXO, condicionalmente. Precisam existir aqui
+             mesmo assim: o upsert do PostgREST exige que todas as linhas do lote tenham o
+             mesmo conjunto de chaves, e sem isso o lote inteiro e recusado. Declarar nulo
+             aqui tambem deixa explicito que "sem cache" significa apagar a URL antiga — que
+             e o comportamento certo quando valor ou vencimento mudaram. */
+          boleto_url: null, boleto_em: null, entrega_status: null,
+          atualizado: marca,
         });
         /* A regra do boleto que NAO se gera. A funcao `avaliarGeravel` existia desde a v3 e
            nunca era chamada: `boleto_geravel` e `boleto_motivo` ficavam nulos nas 1.289
@@ -296,7 +308,7 @@ Deno.serve(async (req) => {
       // primeiro a escrever ganha, e a varredura vai do melhor para o pior — entao um
       // e-mail que aparece no financeiro E no cadastro fica registrado como financeiro.
       if (contatos[k]) return;
-      contatos[k] = { codparc, canal, valor, nome: S(nome), funcao, origem, prioridade, atualizado: new Date().toISOString() };
+      contatos[k] = { codparc, canal, valor, nome: S(nome), funcao, origem, prioridade, atualizado: marca };
     };
 
     for (let i = 0; i < parcs.length; i += 500) {
@@ -340,9 +352,19 @@ Deno.serve(async (req) => {
     /* ---- 3. grava. O boleto_url ja rendido e preservado: o PDF de um titulo que nao
             mudou continua valendo, e re-renderizar 1.000 boletos por rodada seria
             desperdicio puro. ---- */
-    const { data: antigos } = await sb.from("cobranca_titulo").select("nufin,valor,dtvenc,boleto_url,boleto_em");
+    /* PAGINADO. O PostgREST devolve no maximo 1000 linhas por resposta e este select nao
+       tinha range nenhum: com a carteira em 1.884 titulos, o cache so enxergaria 1.000 e os
+       outros 884 perderiam a URL do boleto a cada rodada — PDF regerado todo dia, arquivo
+       novo no Storage todo dia, e o anexo que o cliente ja tinha recebido virando link
+       morto. Passou despercebido enquanto a carteira cabia em 1.000. */
     const cache: Record<string, any> = {};
-    for (const a of (antigos || [])) cache[String(a.nufin)] = a;
+    for (let de = 0; ; de += 1000) {
+      const { data: antigos, error } = await sb.from("cobranca_titulo")
+        .select("nufin,valor,dtvenc,boleto_url,boleto_em").order("nufin").range(de, de + 999);
+      if (error) throw error;
+      for (const a of (antigos || [])) cache[String(a.nufin)] = a;
+      if (!antigos || antigos.length < 1000) break;
+    }
     for (const t of titulos) {
       const a = cache[String(t.nufin)];
       // so reaproveita se valor E vencimento continuam os mesmos: prorrogacao ou
@@ -371,12 +393,35 @@ Deno.serve(async (req) => {
       for (const t of fatia) { const st = porNota[`${t.numnota}|${t.codparc}`]; if (st) t.entrega_status = st; }
     }
 
-    const { error: eDelT } = await sb.from("cobranca_titulo").delete().neq("nufin", -1); if (eDelT) throw eDelT;
-    for (let i = 0; i < titulos.length; i += 500) { const { error } = await sb.from("cobranca_titulo").insert(titulos.slice(i, i + 500)); if (error) throw error; }
+    /* ---- 3c. grava: UPSERT primeiro, limpeza depois -------------------------------
+       Era apagar-tudo-e-inserir, e isso quebrou em 23/09: o CHECK da coluna `fase` recusou
+       um lote no meio e a carteira ficou com 500 linhas de 1.884 — apagada de verdade, com
+       o insert interrompido. Nao ha transacao aqui (cada chamada do PostgREST e a sua
+       propria), entao a ordem e que protege: enquanto o upsert nao termina, o snapshot
+       antigo continua inteiro no lugar. Se algo falhar no meio, o `throw` acontece ANTES da
+       limpeza e o que sobra e um espelho com dado velho misturado com novo — feio, porem
+       inteiro, e a proxima rodada conserta. Melhor do que uma carteira pela metade, que faz
+       o painel mentir e o montar cobrar so uma parte de quem deve.
+
+       A limpeza usa a marca da rodada, e nao uma lista de NUFIN: a lista teria 1.884 itens
+       e o `not in` do PostgREST estoura no tamanho da URL. `atualizado < marca` e o mesmo
+       conjunto, dito pelo lado de dentro. */
+    for (let i = 0; i < titulos.length; i += 500) {
+      const { error } = await sb.from("cobranca_titulo").upsert(titulos.slice(i, i + 500), { onConflict: "nufin" });
+      if (error) throw error;
+    }
+    const { error: eLimpaT, count: sumiramT } = await sb.from("cobranca_titulo")
+      .delete({ count: "exact" }).lt("atualizado", marca);
+    if (eLimpaT) throw eLimpaT;
 
     const lista = Object.values(contatos);
-    const { error: eDelC } = await sb.from("cobranca_contato").delete().neq("codparc", -1); if (eDelC) throw eDelC;
-    for (let i = 0; i < lista.length; i += 500) { const { error } = await sb.from("cobranca_contato").insert(lista.slice(i, i + 500)); if (error) throw error; }
+    for (let i = 0; i < lista.length; i += 500) {
+      const { error } = await sb.from("cobranca_contato").upsert(lista.slice(i, i + 500), { onConflict: "codparc,canal,valor" });
+      if (error) throw error;
+    }
+    const { error: eLimpaC, count: sumiramC } = await sb.from("cobranca_contato")
+      .delete({ count: "exact" }).lt("atualizado", marca);
+    if (eLimpaC) throw eLimpaC;
 
     /* ---- 4. resumo honesto: o que da para cobrar e o que nao da ---- */
     const vencidos = titulos.filter((t) => t.fase === "vencido");
@@ -408,6 +453,8 @@ Deno.serve(async (req) => {
       futuro: { titulos: futuros.length, com_boleto: comBoleto(futuros), janela_impressao_dias: IMPRESSAO },
       a_vencer: { titulos: aVencer.length, valor: Math.round(aVencer.reduce((a, b) => a + b.valor, 0)), com_boleto: comBoleto(aVencer), sem_boleto: aVencer.length - comBoleto(aVencer), dias: DIAS },
       contatos: lista.length,
+      // o que o ERP nao devolveu mais nesta rodada (pago, cancelado, fora da janela)
+      sairam: { titulos: sumiramT ?? 0, contatos: sumiramC ?? 0 },
       // quantos parceiros tem como MELHOR contato cada origem — a leitura que diz se a
       // cobranca esta falando com o financeiro ou com quem atende o telefone
       melhor_origem: porOrigem,

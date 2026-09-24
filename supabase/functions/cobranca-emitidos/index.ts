@@ -1,4 +1,4 @@
-// cobranca-emitidos (v2) — o boleto chega quando ele NASCE, nao uma semana antes de vencer.
+// cobranca-emitidos (v3) — o boleto chega quando ele NASCE, nao uma semana antes de vencer.
 //
 // O PROBLEMA QUE ISTO RESOLVE
 //   O motor de cobranca so olha para quem esta vencido ou vence na proxima semana. Entao um
@@ -207,14 +207,34 @@ Deno.serve(async (req) => {
        outra so entregando — e a segunda desmontaria a primeira. */
     const JANELA = Math.max(0, Number(cfg?.emitidos_janela_dias ?? 5));
     const desde = new Date(Date.now() - JANELA * 864e5).toISOString().slice(0, 10);
-    const { data: comBoleto, error: eT } = await sb.from("cobranca_titulo").select("*")
-      .not("boleto_url", "is", null).neq("fase", "vencido")
-      .gte("dt_impressao", desde).limit(3000);
-    if (eT) throw eT;
 
-    const { data: jaEntregues } = await sb.from("boleto_entregue").select("nufin").limit(20000);
-    const entregue = new Set((jaEntregues || []).map((x: any) => Number(x.nufin)));
-    const novos = (comBoleto || []).filter((t: any) => !entregue.has(Number(t.nufin)));
+    /* PAGINADO, e nao `.limit(3000)`. O PostgREST devolve no maximo 1000 linhas por
+       resposta e `.limit()` so ABAIXA esse teto, nunca o levanta — um numero grande ali da
+       a impressao de que o limite foi resolvido e nao foi. Hoje a janela traz ~614 titulos
+       e caberia; num dia de faturamento pesado, nao. */
+    const comBoleto: any[] = [];
+    for (let de = 0; ; de += 1000) {
+      const { data, error } = await sb.from("cobranca_titulo").select("*")
+        .not("boleto_url", "is", null).neq("fase", "vencido")
+        .gte("dt_impressao", desde).order("nufin").range(de, de + 999);
+      if (error) throw error;
+      comBoleto.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+
+    /* O LIVRO, consultado SO pelos NUFIN que interessam. Antes lia o livro inteiro com
+       `.limit(20000)` — que o PostgREST corta em 1000. Enquanto `boleto_entregue` tinha 555
+       linhas funcionava; passando de mil, os mais antigos sumiriam da consulta e a funcao
+       reenviaria boleto ja entregue, que e exatamente o que este livro existe para impedir.
+       Perguntar pelos candidatos em lotes nao depende do tamanho do livro. */
+    const entregue = new Set<number>();
+    const candidatos = comBoleto.map((t: any) => Number(t.nufin));
+    for (let i = 0; i < candidatos.length; i += 500) {
+      const { data, error } = await sb.from("boleto_entregue").select("nufin").in("nufin", candidatos.slice(i, i + 500));
+      if (error) throw error;
+      for (const x of (data || [])) entregue.add(Number(x.nufin));
+    }
+    const novos = comBoleto.filter((t: any) => !entregue.has(Number(t.nufin)));
 
     if (backfill) {
       // marca sem mandar: e a virada da rotina, para a estreia nao despejar a carteira toda

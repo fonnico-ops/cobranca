@@ -1,0 +1,17 @@
+-- 014b — nota sobre a gravacao do refresh (sem DDL; fica aqui para quem procurar no sql/)
+--
+-- O cobranca-refresh nao apaga mais a tabela antes de inserir. Agora e UPSERT pela chave
+-- primaria, e so depois um DELETE do que ficou com `atualizado` anterior a marca da rodada.
+--
+-- Por que: em 23/09 um CHECK recusou um lote no meio e a carteira ficou com 500 linhas de
+-- 1.884 — apagada de verdade, com o insert interrompido. Nao ha transacao (cada chamada do
+-- PostgREST e a sua propria), entao o que protege e a ORDEM: enquanto o upsert nao termina,
+-- o snapshot antigo continua inteiro. Falhando no meio, sobra dado velho misturado com novo
+-- — feio, porem inteiro, e a proxima rodada conserta.
+--
+-- A limpeza usa `atualizado < marca` e nao uma lista de NUFIN: a lista teria ~2.000 itens e
+-- o `not in` do PostgREST estoura no tamanho da URL.
+--
+-- Conferido em 24/09 com uma linha-fantasma plantada de proposito (nufin 999999999,
+-- `atualizado` em 2000-01-01): a rodada devolveu `sairam: {titulos: 1, contatos: 0}`, o
+-- fantasma sumiu, os 2.093 titulos ficaram e os 1.236 PDFs foram todos preservados.
