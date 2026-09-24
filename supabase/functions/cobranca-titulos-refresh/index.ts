@@ -267,6 +267,18 @@ Deno.serve(async (req) => {
           dt_impressao: dataIso(r[35]),
           atualizado: new Date().toISOString(),
         });
+        /* A regra do boleto que NAO se gera. A funcao `avaliarGeravel` existia desde a v3 e
+           nunca era chamada: `boleto_geravel` e `boleto_motivo` ficavam nulos nas 1.289
+           linhas. Isso apagava em silencio o terceiro caminho da mensagem — o cobranca-montar
+           conta `semNoBanco` com `t.boleto_geravel === false`, entao ele dava sempre zero e a
+           frase "teve o boleto emitido direto pelo banco, se nao encontrar me avise" nunca
+           saia. No lugar dela o cliente do Grafeno ouvia "eu providencio a 2a via", que e
+           justamente o que nao da para fazer. Visto em 23/09 nos 42 cards da fila: todos com
+           sem_boleto_no_banco = 0, inclusive os 73 titulos da conta 113. */
+        const ultimo = titulos[titulos.length - 1];
+        const g = avaliarGeravel(ultimo, REGRAS_BOLETO);
+        ultimo.boleto_geravel = g.geravel;
+        ultimo.boleto_motivo = g.motivo;
       }
       if (rows.length < 2000) break;
     }
@@ -369,6 +381,7 @@ Deno.serve(async (req) => {
     /* ---- 4. resumo honesto: o que da para cobrar e o que nao da ---- */
     const vencidos = titulos.filter((t) => t.fase === "vencido");
     const aVencer = titulos.filter((t) => t.fase === "a_vencer");
+    const futuros = titulos.filter((t) => t.fase === "futuro");
     const comBoleto = (arr: any[]) => arr.filter((t) => t.linha_digitavel && t.codigo_barras?.length === 44).length;
     // Conta PARCEIROS, nao contatos. A primeira versao somava um por contato empatado na
     // melhor prioridade, entao um cliente com telefone E e-mail do cadastro contava duas
@@ -390,6 +403,9 @@ Deno.serve(async (req) => {
       titulos: titulos.length,
       parceiros: parcs.length,
       vencido: { titulos: vencidos.length, valor: Math.round(vencidos.reduce((a, b) => a + b.valor, 0)), com_boleto: comBoleto(vencidos), sem_boleto: vencidos.length - comBoleto(vencidos) },
+      // 'futuro' e o boleto recem-impresso que vence longe: nao entra em cobranca nenhuma,
+      // existe so para o cobranca-emitidos poder entrega-lo no dia em que nasceu
+      futuro: { titulos: futuros.length, com_boleto: comBoleto(futuros), janela_impressao_dias: IMPRESSAO },
       a_vencer: { titulos: aVencer.length, valor: Math.round(aVencer.reduce((a, b) => a + b.valor, 0)), com_boleto: comBoleto(aVencer), sem_boleto: aVencer.length - comBoleto(aVencer), dias: DIAS },
       contatos: lista.length,
       // quantos parceiros tem como MELHOR contato cada origem — a leitura que diz se a
@@ -397,6 +413,8 @@ Deno.serve(async (req) => {
       melhor_origem: porOrigem,
       sem_contato_nenhum: semContato.length,
       boletos_reaproveitados: titulos.filter((t) => t.boleto_url).length,
+      // quantos o ERP nunca vai gerar porque o boleto saiu direto no banco
+      boleto_so_no_banco: titulos.filter((t) => t.boleto_geravel === false).length,
       // de quantos titulos a Nina consegue dizer de onde vieram
       origem: {
         // `&& !t.contrato`: no Clube o NUMNOTA vem preenchido com o numero do CONTRATO, e

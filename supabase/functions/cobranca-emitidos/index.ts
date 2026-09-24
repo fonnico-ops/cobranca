@@ -287,6 +287,7 @@ Deno.serve(async (req) => {
         // para o cliente. Remontar por fora seria testar outra coisa.
         itens.push({ grupo, nome: ord[0]?.sacado, titulos: ord.length, valor: total, anexos: urls.length,
           whatsapp: alvoWpp?.valor ?? null, email: alvoMail?.valor ?? null, texto,
+          impresso_em: ord.map((t: any) => t.dt_impressao).filter(Boolean),
           assunto: `${EMPRESA} — boleto${ord.length > 1 ? "s" : ""} da sua compra (${brl(total)})`,
           corpo_email: html(texto, ord.map((t: any) => ({ url: t.boleto_url, dtvenc: t.dtvenc, valor: t.valor })).filter((x: any) => x.url)),
           urls });
