@@ -1,4 +1,4 @@
-// cobranca-painel (v3) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v4) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -9,6 +9,20 @@
 //
 // v3: `?aba=saude` responde "o que saiu, o que nao saiu, e por que" — que e a pergunta que
 //     vem depois de ligar o motor. Sem ela a correcao depende de alguem abrir o SQL.
+//
+// v4: a tela nao abre mais pela URL da funcao — abre pelo GitHub Pages (`docs/painel.html`).
+//     Nao e gosto, e regra da plataforma: o dominio supabase.co nao entrega pagina. Medido:
+//     funcao com text/html, Storage com mimetype text/html, application/xhtml+xml e text/xml
+//     chegam todos como `text/plain` + `nosniff` (o navegador mostra o codigo-fonte); so
+//     image/svg+xml passa, e sem valor aqui porque o gateway ainda manda
+//     `content-security-policy: default-src 'none'; sandbox`, que mataria os botoes.
+//     A casca no Pages busca este HTML e escreve na pagina. Duas consequencias no codigo:
+//       - o POST do botao vai para a URL ABSOLUTA da funcao (ctx.api). Na casca,
+//         location.pathname e o caminho do Pages, e postar para la nao dispararia nada.
+//       - todo link interno leva a chave (ctx.sufixo): na casca cada `?aba=...` troca a query
+//         inteira, e sem isso o primeiro clique cairia no 401.
+//     E como o link agora e publico e o repositorio tambem, `cobranca_config.painel_chave`
+//     passou a valer: sem `?k=` certo, nem GET nem POST.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=conversas | ?aba=saude&dias=30
@@ -108,14 +122,15 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 <div class="barra">
   <button id="todos">Marcar todos</button><button id="nenhum">Desmarcar</button>
   <span style="flex:1"></span>
-  <a href="?aba=conversas" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Conversas da Nina &rarr;</a>
-  <a href="?aba=saude" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Saúde &rarr;</a>
+  <a href="?aba=conversas${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Conversas da Nina &rarr;</a>
+  <a href="?aba=saude${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Saúde &rarr;</a>
   <button id="recusar">Recusar</button>
   <button id="aprovar" class="go">Aprovar e disparar</button>
 </div>
 <div id="aviso"></div>
 ${cards.length ? cartoes : '<div class="vazio-tudo">Nada aguardando aprovação nesta rodada.<br>Rode o <code>cobranca-montar</code> para montar a fila.</div>'}
 </div><script>
+const API=${JSON.stringify(ctx.api)};
 const $=(s)=>document.querySelector(s), $$=(s)=>[...document.querySelectorAll(s)];
 const sels=()=>$$(".sel:checked:not([disabled])").map(x=>Number(x.value));
 function aviso(t,erro){const a=$("#aviso");a.style.display="block";a.textContent=t;
@@ -129,7 +144,7 @@ async function manda(acao){
   if(!confirm("Confirma "+verbo+" "+ids.length+" grupo(s)?\\n\\nNo aprovar, as mensagens saem de verdade para os clientes.")) return;
   $("#aprovar").disabled=true;$("#recusar").disabled=true;aviso("Processando "+ids.length+"\\u2026");
   try{
-    const r=await fetch(location.pathname+location.search,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao,ids})});
+    const r=await fetch(API+location.search,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao,ids})});
     const d=await r.json();
     if(!d.ok) throw new Error(d.erro||"falhou");
     aviso(acao==="aprovar"
@@ -190,7 +205,7 @@ a.volta{color:var(--ac);text-decoration:none;font-size:13px}
 </style></head><body><div class="wrap">
 <h1>Cobrança — conversas da Nina</h1>
 <div class="sub">${cs.length} conversa(s) · ${conta("ativa")} em cobrança · ${conta("promessa")} com promessa · ${conta("repassada")} com atendente · ${conta("encerrada")} encerradas${ctx.atendeDesligado ? ' · <b style="color:#c60">a Nina nao responde (cobranca_config.atende_ativo = false)</b>' : ""}<br>
-<a class="volta" href="?fase=vencido">&larr; voltar para a aprovação</a> · <a class="volta" href="?aba=saude">saúde &rarr;</a></div>
+<a class="volta" href="?fase=vencido${ctx.sufixo}">&larr; voltar para a aprovação</a> · <a class="volta" href="?aba=saude${ctx.sufixo}">saúde &rarr;</a></div>
 ${cs.length ? linhas : '<div class="vazio-tudo">Nenhuma conversa ainda.<br>Elas nascem quando o <code>cobranca-aprovar</code> dispara o primeiro toque.</div>'}
 </div></body></html>`;
 }
@@ -329,7 +344,7 @@ td.num{text-align:right;white-space:nowrap}td.ruim{color:var(--ruim);font-weight
 a.volta{color:var(--ac);text-decoration:none;font-size:13px}
 </style></head><body><div class="wrap">
 <h1>Cobrança — saúde</h1>
-<div class="sub">últimos ${d.dias} dias · <a class="volta" href="?fase=vencido">aprovação</a> · <a class="volta" href="?aba=conversas">conversas</a></div>
+<div class="sub">últimos ${d.dias} dias · <a class="volta" href="?fase=vencido${d.sufixo}">aprovação</a> · <a class="volta" href="?aba=conversas${d.sufixo}">conversas</a></div>
 
 <section><h2>As três chaves</h2>
 ${chave(d.cfg.ativo, "ativo", "a rodada diária monta e dispara cobrança")}
@@ -514,6 +529,21 @@ Deno.serve(async (req) => {
     const rodada = (u.searchParams.get("rodada") || hojeSp()).slice(0, 10);
     const fase = u.searchParams.get("fase") || "vencido";
 
+    const { data: cfg } = await sb.from("cobranca_config")
+      .select("ativo,instancia,atende_ativo,toques_max,painel_chave").eq("id", 1).maybeSingle();
+
+    // A tela mostra nome, CNPJ e divida de cliente, e o botao dispara mensagem de verdade.
+    // Enquanto `painel_chave` estiver vazia a porta fica aberta (era assim antes); com chave
+    // cadastrada, sem `?k=` certo nao passa nem o GET nem o POST.
+    const chave = String(cfg?.painel_chave || "");
+    if (chave && u.searchParams.get("k") !== chave) {
+      return new Response("Link sem a chave de acesso do painel. Peca o link certo a quem cuida da cobranca.",
+        { status: 401, headers: { ...cors, "Content-Type": "text/plain; charset=utf-8" } });
+    }
+    // O `k` viaja em TODO link interno: na casca do Pages cada `?aba=...` troca a query inteira,
+    // e sem isso o primeiro clique cairia no 401.
+    const sufixo = chave ? "&k=" + encodeURIComponent(chave) : "";
+
     if (req.method === "POST") {
       const b = await req.json().catch(() => ({}));
       const ids = (Array.isArray(b.ids) ? b.ids : []).map((x: any) => Number(x)).filter(Boolean);
@@ -529,11 +559,9 @@ Deno.serve(async (req) => {
       return j(await r.json().catch(() => ({ ok: false, erro: "resposta ilegivel do cobranca-aprovar" })), r.status);
     }
 
-    const { data: cfg } = await sb.from("cobranca_config").select("ativo,instancia,atende_ativo,toques_max").eq("id", 1).maybeSingle();
-
     if (u.searchParams.get("aba") === "saude") {
       const dias = Math.max(1, Math.min(365, Number(u.searchParams.get("dias")) || 30));
-      return new Response(paginaSaude(await dadosSaude(sb, dias)), {
+      return new Response(paginaSaude({ ...await dadosSaude(sb, dias), sufixo }), {
         headers: { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
       });
     }
@@ -545,7 +573,7 @@ Deno.serve(async (req) => {
       if (eC) throw eC;
       const peso: Record<string, number> = { repassada: 0, promessa: 1, ativa: 2, encerrada: 3 };
       const ordenadas = (cs || []).slice().sort((a: any, b: any) => (peso[a.status] ?? 9) - (peso[b.status] ?? 9));
-      return new Response(paginaConversas(ordenadas, { maxToques: Number(cfg?.toques_max || 5), atendeDesligado: cfg?.atende_ativo !== true }), {
+      return new Response(paginaConversas(ordenadas, { maxToques: Number(cfg?.toques_max || 5), atendeDesligado: cfg?.atende_ativo !== true, sufixo }), {
         headers: { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
       });
     }
@@ -554,7 +582,10 @@ Deno.serve(async (req) => {
       .eq("rodada", rodada).eq("fase", fase).order("valor", { ascending: false }).limit(300);
     if (error) throw error;
 
-    return new Response(pagina(cards || [], { rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true }), {
+    return new Response(pagina(cards || [], {
+      rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true, sufixo,
+      api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel",
+    }), {
       headers: { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
   } catch (e) { return j({ ok: false, erro: String(e) }, 500); }

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pt-BR"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cobrança — painel</title>
+<!--
+  A casca do painel. Existe por uma regra da plataforma, nao por gosto: o dominio supabase.co
+  nao entrega pagina para o navegador. Medido nesta ordem, em 24/09:
+
+    Edge Function devolvendo text/html          -> chega como text/plain + nosniff
+    Storage (bucket publico, mimetype text/html)-> chega como text/plain + nosniff
+    application/xhtml+xml e text/xml            -> chega como text/plain + nosniff
+    image/svg+xml                               -> passa (unico que passa, e inutil aqui:
+                                                   o gateway ainda manda
+                                                   `content-security-policy: default-src 'none'; sandbox`,
+                                                   que mata o script dos botoes)
+
+  Por isso a tela mora aqui, no GitHub Pages, que serve HTML de verdade, e busca o conteudo
+  da funcao. Se um dia o Supabase passar a servir HTML, esta casca pode ser jogada fora e o
+  link volta a ser o da funcao.
+
+  document.write e de proposito: a tela tem <script> inline (marcar todos, aprovar, recusar) e
+  innerHTML NAO executa script. Com document.open()/write()/close() executa, a URL da barra
+  continua sendo esta — os links `?aba=...` e o location.reload() de depois do disparo seguem
+  funcionando — e a query inteira, com a chave, e repassada para a funcao.
+-->
+<style>
+  :root{color-scheme:light dark}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;
+       font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       background:#f6f7f9;color:#444}
+  @media(prefers-color-scheme:dark){body{background:#15181c;color:#c9cdd3}}
+  .caixa{text-align:center;padding:24px;max-width:560px}
+  .rodela{width:26px;height:26px;margin:0 auto 14px;border:3px solid #ccd;border-top-color:#06c;
+          border-radius:50%;animation:gira .8s linear infinite}
+  @keyframes gira{to{transform:rotate(360deg)}}
+  .erro{color:#b02a2a;text-align:left}
+</style></head>
+<body><div class="caixa" id="caixa">
+  <div class="rodela"></div>
+  <div>Carregando o painel de cobrança…</div>
+</div>
+<script>
+var API = "https://bwbeieumxcuomtrvlqxs.supabase.co/functions/v1/cobranca-painel";
+
+// A chave vem no link. Guardar no navegador e so conveniencia: quem salvou o favorito sem a
+// chave continua entrando neste aparelho. A chave nao mora neste arquivo — o repositorio e publico.
+var q = new URLSearchParams(location.search);
+try {
+  if (q.get("k")) localStorage.setItem("painel_k", q.get("k"));
+  else if (localStorage.getItem("painel_k")) q.set("k", localStorage.getItem("painel_k"));
+} catch (e) { /* aba privada, site data bloqueado: segue sem lembrar */ }
+
+fetch(API + "?" + q.toString(), { headers: { accept: "text/html" }, cache: "no-store" })
+  .then(function (r) {
+    return r.text().then(function (t) {
+      if (r.status === 401) throw new Error(t || "link sem a chave de acesso");
+      if (!r.ok) throw new Error("a função respondeu " + r.status + ": " + t.slice(0, 200));
+      return t;
+    });
+  })
+  .then(function (html) {
+    if (html.charAt(0) !== "<") throw new Error("resposta inesperada: " + html.slice(0, 200));
+    document.open();
+    document.write(html);
+    document.close();
+  })
+  .catch(function (e) {
+    document.getElementById("caixa").innerHTML =
+      '<p class="erro"><b>Não consegui abrir o painel.</b><br>' +
+      String(e.message || e).replace(/[<>&]/g, "") + '</p>' +
+      '<p>O motor continua rodando — o que falhou foi só a tela.</p>';
+  });
+</script>
+</body></html>
