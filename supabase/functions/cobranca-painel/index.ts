@@ -1,4 +1,4 @@
-// cobranca-painel (v5) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v6) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -29,6 +29,12 @@
 //     Resultado: o POST saia sem `?k=`, batia no 401 e o "Aprovar e disparar" nao fazia
 //     nada. Agora o servidor injeta no HTML a URL COMPLETA do POST — a mesma query que ele
 //     acabou de aceitar no GET, chave inclusive — e o navegador nao precisa adivinhar nada.
+//
+// v6: a tela diz, ANTES do clique, quanto tempo o disparo leva e o que acontece com o
+//     numero fora do ar. Eram as duas perguntas que so apareciam depois de aprovar: "por
+//     que nao chegou ainda?" (leva ~54s por mensagem, de proposito) e "por que nao saiu
+//     nada?" (o numero esta pausado). Com o WhatsApp caido a faixa fica ambar e diz
+//     quantos saem por e-mail agora e quantos so tem WhatsApp e ficam para a proxima.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=conversas | ?aba=saude&dias=30
@@ -63,6 +69,24 @@ const ORIGEM_COR: Record<string, string> = {
 
 function pagina(cards: any[], ctx: any): string {
   const total = cards.reduce((a, c) => a + Number(c.valor || 0), 0);
+
+  /* QUANTO TEMPO ISTO VAI LEVAR, antes de clicar.
+     O WhatsApp nao sai de uma vez: o trilho espaca as mensagens para o numero nao ser
+     restringido pelo WhatsApp (foi o que tirou a "Campanhas Nitron" do ar em 27/08). Medido
+     no disparo de 24/09: 22 mensagens em 1.191s, ou 54s por mensagem, para 45s configurados
+     — os 20% de sobra sao a granularidade do processador, que roda 1x por minuto. Entao a
+     conta e o intervalo configurado vezes 1,2, e nao um numero chutado aqui.
+     O e-mail sai na hora e por isso nao entra na conta. */
+  const aguardando = cards.filter((c: any) => c.status === "aguardando");
+  const temCanal = (c: any, canal: string) => (Array.isArray(c.contatos) ? c.contatos : []).some((x: any) => x.canal === canal);
+  const porWpp = aguardando.filter((c: any) => temCanal(c, "whatsapp")).length;
+  const porMail = aguardando.filter((c: any) => temCanal(c, "email")).length;
+  // quem NAO tem e-mail e o que fica para tras quando o numero esta fora do ar. Isto e uma
+  // contagem propria e nao a diferenca `porWpp - porMail`: os conjuntos se cruzam, e a
+  // subtracao dava 0 num caso com 1 grupo so de WhatsApp — o teste local pegou.
+  const soWpp = aguardando.filter((c: any) => temCanal(c, "whatsapp") && !temCanal(c, "email")).length;
+  const minutos = Math.round((porWpp * Number(ctx.segPorMsg || 54)) / 60);
+  const tempo = minutos < 1 ? "menos de 1 min" : (minutos < 90 ? `${minutos} min` : `${Math.floor(minutos / 60)}h${String(minutos % 60).padStart(2, "0")}`);
   const cartoes = cards.map((c) => {
     const contatos = (Array.isArray(c.contatos) ? c.contatos : []);
     const wpp = contatos.find((x: any) => x.canal === "whatsapp");
@@ -120,11 +144,19 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .msg{white-space:pre-wrap;background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;margin:10px 0 0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 .jasaiu{margin-top:8px;font-size:12.5px;color:var(--mut)}
 #aviso{padding:10px 12px;border-radius:8px;margin:10px 0;display:none}
+.ritmo{font-size:13px;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 11px;margin:0 0 12px}
+.alerta{font-size:13.5px;background:#fff4e5;color:#7a3e00;border:1px solid #f0c78a;border-radius:8px;padding:10px 12px;margin:0 0 12px}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]) .alerta{background:#3a2a12;color:#f0c78a;border-color:#6b4a1f}}
 .vazio-tudo{text-align:center;color:var(--mut);padding:60px 20px}
 @media(max-width:560px){.wrap{padding:12px}.card header{flex-wrap:wrap}.vlr{width:100%}}
 </style></head><body><div class="wrap">
 <h1>Cobrança — ${ctx.fase === "vencido" ? "títulos vencidos" : "a vencer na próxima semana"}</h1>
 <div class="sub">rodada ${esc(ctx.rodada)} · ${cards.length} grupo(s) · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
+${ctx.wppPausado
+  ? `<div class="alerta">O WhatsApp da cobrança está fora do ar desde ${esc(ctx.pausadaDesde)}.
+       Aprovando agora, saem <b>${porMail} por e-mail</b>, na hora.
+       ${soWpp > 0 ? `<b>${soWpp} grupo(s) só têm WhatsApp</b> e ficam para a próxima rodada.` : "Nenhum grupo depende só de WhatsApp."}</div>`
+  : (porWpp ? `<div class="ritmo"><b>${porWpp}</b> por WhatsApp — o envio leva cerca de <b>${tempo}</b>, porque as mensagens saem espaçadas para o número não ser restringido${porMail ? ` · <b>${porMail}</b> por e-mail, que sai na hora` : ""}</div>` : "")}
 <div class="barra">
   <button id="todos">Marcar todos</button><button id="nenhum">Desmarcar</button>
   <span style="flex:1"></span>
@@ -154,7 +186,7 @@ async function manda(acao){
     const d=await r.json();
     if(!d.ok) throw new Error(d.erro||"falhou");
     aviso(acao==="aprovar"
-      ? ("Pronto: "+(d.enfileirados||0)+" grupo(s) \\u2014 "+(d.whatsapp_na_fila||0)+" WhatsApp na fila, "+(d.email_enviado||0)+" e-mail enviado"+(d.erros?", "+d.erros+" com erro":"")+". Recarregando\\u2026")
+      ? ("Pronto: "+(d.enfileirados||0)+" grupo(s) \\u2014 "+(d.whatsapp_na_fila||0)+" WhatsApp na fila, "+(d.email_enviado||0)+" e-mail enviado"+(d.erros?", "+d.erros+" com erro":"")+(d.segurados_ate_o_whatsapp_voltar?", "+d.segurados_ate_o_whatsapp_voltar+" esperando o WhatsApp voltar":"")+". Recarregando\\u2026")
       : ((d.recusados||0)+" recusado(s). Recarregando\\u2026"));
     setTimeout(()=>location.reload(),2200);
   }catch(e){aviso("Erro: "+e.message,true);$("#aprovar").disabled=false;$("#recusar").disabled=false;}
@@ -588,8 +620,20 @@ Deno.serve(async (req) => {
       .eq("rodada", rodada).eq("fase", fase).order("valor", { ascending: false }).limit(300);
     if (error) throw error;
 
+    /* O estado do numero e o ritmo, para a tela dizer quanto tempo o disparo leva e o que
+       acontece com o numero fora do ar — as duas perguntas que so apareciam DEPOIS do clique. */
+    const [instR, ritmoR] = await Promise.all([
+      sb.from("instancia_ghl").select("pausada_em").eq("instancia", cfg?.instancia || "Nina").maybeSingle(),
+      sb.from("fila_config").select("wpp_intervalo_seg").eq("id", 1).maybeSingle(),
+    ]);
+    const pausadaEm = instR.data?.pausada_em || null;
+    // 1,2 = o que o processador acrescenta ao intervalo configurado (ver o comentario em pagina())
+    const segPorMsg = Math.round(Number(ritmoR.data?.wpp_intervalo_seg ?? 45) * 1.2);
+
     return new Response(pagina(cards || [], {
       rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true, sufixo,
+      wppPausado: !!pausadaEm, segPorMsg,
+      pausadaDesde: pausadaEm ? new Date(pausadaEm).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "",
       // com a query inteira: e por ela que a chave chega ao POST
       api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel" + u.search,
     }), {
