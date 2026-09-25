@@ -1,4 +1,4 @@
-// cobranca-aprovar (v3) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
+// cobranca-aprovar (v4) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
 //
 // O QUE ESTA FUNCAO FAZ E NAO FAZ
 //   WhatsApp: escreve em fila_envio e para. Quem manda e o fila-processar, que ja carrega o
@@ -27,6 +27,18 @@
 // v3: abre a CONVERSA (cobranca_conversa). Era um disparo sem depois: quem respondesse
 //     "manda a 2a via" falava sozinho, e quem nao respondesse nunca mais era lembrado.
 //     A linha gravada aqui e o toque 1 — e o cobranca-atende so responde quem tem linha la.
+//
+// v4: COM O WHATSAPP CAIDO, A RODADA SEGUE SO POR E-MAIL.
+//     Antes, instancia pausada recusava o lote inteiro (409) e a cobranca do dia
+//     simplesmente nao acontecia — foi o que aconteceu em 24/09: o numero caiu as 18:24 e
+//     nada saiu, nem para quem tinha e-mail no cadastro. Perder o dia inteiro porque um
+//     canal caiu e desproporcional: o e-mail nao depende de instancia nenhuma.
+//     Agora, com o numero fora do ar:
+//       - quem tem e-mail recebe HOJE, por e-mail;
+//       - quem so tem WhatsApp fica em 'aguardando', com o motivo escrito, e entra na
+//         proxima rodada — nada e enfileirado para sair sozinho quando o numero voltar,
+//         que era o jeito de virar avalanche na volta;
+//       - o cobranca-vigia avisa a pessoa que o numero caiu, por WhatsApp e por e-mail.
 //
 // POST { ids?: [n], rodada?, fase?, todos?: true, seco?: true, aprovado_por?: "nome" }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -143,9 +155,10 @@ Deno.serve(async (req) => {
     const { data: inst } = await sb.from("instancia_ghl").select("instancia,usuario_ghl_id,ativa,pausada_em").eq("instancia", NOME_INST).eq("empresa", empId).maybeSingle();
     if (!inst?.usuario_ghl_id) return j({ ok: false, erro: `instancia "${NOME_INST}" sem usuario_ghl_id no cadastro instancia_ghl` }, 400);
     if (inst.ativa !== true) return j({ ok: false, erro: `instancia "${NOME_INST}" esta inativa no cadastro` }, 409);
-    // pausada = caiu. Enfileirar agora deixaria a cobranca parada na fila ate ela voltar; o
-    // card fica aguardando e a proxima rodada tenta de novo, que e menos confuso.
-    if (inst.pausada_em) return j({ ok: false, erro: `instancia "${NOME_INST}" esta pausada desde ${inst.pausada_em} (queda) — nada foi enfileirado`, pausada: true }, 409);
+    // pausada = o numero caiu. Nada de WhatsApp sai enquanto durar: enfileirar agora so
+    // encheria a fila para explodir na volta. Mas o e-mail nao tem instancia e nao tem dono,
+    // entao a rodada CONTINUA por e-mail — e quem so tem WhatsApp fica aguardando a proxima.
+    const wppPausado = !!inst.pausada_em;
     const nina = String(inst.usuario_ghl_id);
 
     const g = await empresaGhl(sb, empId);
@@ -182,8 +195,20 @@ Deno.serve(async (req) => {
 
       // UM destino por canal, o de melhor prioridade. Mandar para todos os e-mails do
       // cadastro transforma uma cobranca em quatro, e o cliente responde a uma so.
-      const alvoWpp = CANAIS.includes("whatsapp") ? contatos.find((c) => c.canal === "whatsapp") : null;
+      const temWpp = CANAIS.includes("whatsapp") ? contatos.find((c) => c.canal === "whatsapp") : null;
+      // com o numero caido o destino de WhatsApp some do card DESTA rodada, e so dela
+      const alvoWpp = wppPausado ? null : temWpp;
       const alvoMail = CANAIS.includes("email") ? contatos.find((c) => c.canal === "email") : null;
+
+      /* So tinha WhatsApp, e o WhatsApp esta fora do ar: o card espera, sem virar erro e sem
+         ir para a fila. Na proxima rodada ele e tentado de novo — e se o numero tiver voltado,
+         sai normal. E o unico jeito de nao perder o cliente nem acumular envio represado. */
+      if (wppPausado && temWpp && !alvoMail) {
+        const motivo = `o WhatsApp da cobranca esta fora do ar desde ${inst.pausada_em} e este grupo so tem WhatsApp — nada foi enviado; ele volta na proxima rodada`;
+        if (!seco) await sb.from("cobranca_fila").update({ status: "aguardando", motivo }).eq("id", card.id);
+        resumo.push({ id: card.id, nome: card.nome, valor: card.valor, resultado: "segurado_wpp" });
+        continue;
+      }
 
       if (!alvoWpp && !alvoMail) {
         if (!seco) await sb.from("cobranca_fila").update({ status: "sem_contato", motivo: "nenhum contato nos canais ligados em cobranca_config.canais" }).eq("id", card.id);
@@ -299,6 +324,10 @@ Deno.serve(async (req) => {
       erros: conta((r) => r.resultado === "erro"),
       sem_contato: conta((r) => r.resultado === "sem_contato"),
       desatualizados: conta((r) => r.resultado === "desatualizado"),
+      // com o numero caido isto e o que o painel precisa dizer em voz alta: saiu por e-mail,
+      // e tantos ficaram esperando o WhatsApp voltar
+      whatsapp_pausado: wppPausado,
+      segurados_ate_o_whatsapp_voltar: conta((r) => r.resultado === "segurado_wpp"),
       whatsapp_na_fila: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "whatsapp" && e.ok).length, 0),
       email_enviado: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "email" && e.ok).length, 0),
       instancia: NOME_INST,

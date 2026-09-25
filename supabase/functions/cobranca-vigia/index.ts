@@ -1,4 +1,4 @@
-// cobranca-vigia (v2) — olha o numero de WhatsApp da cobranca e AVISA uma pessoa quando ele cai.
+// cobranca-vigia (v3) — olha o numero de WhatsApp da cobranca e AVISA uma pessoa quando ele cai.
 //
 // POR QUE EXISTE. Em 24/09 as 18:24 o ZaptosWPP escreveu, dentro da propria conversa, que a
 // "Nina Financeiro" estava desconectada. O trilho compartilhado fez a parte dele: pausou a
@@ -56,10 +56,11 @@ Deno.serve(async (req) => {
     const u = new URL(req.url);
 
     const { data: cfg } = await sb.from("cobranca_config")
-      .select("instancia,alerta_fone,alerta_instancia,alerta_lembrete_horas,vigia_estado,painel_chave")
+      .select("instancia,alerta_fone,alerta_email,alerta_instancia,alerta_lembrete_horas,vigia_estado,painel_chave")
       .eq("id", 1).maybeSingle();
     const NOME_INST = String(cfg?.instancia || "Nina Financeiro");
     const FONE = String(cfg?.alerta_fone || "").replace(/\D/g, "");
+    const MAIL = String(cfg?.alerta_email || "").trim();
     const ESPERA = Math.max(1, Number(cfg?.alerta_lembrete_horas ?? 3));
     const estadoAnterior = (cfg?.vigia_estado || {}) as any;
 
@@ -80,7 +81,7 @@ Deno.serve(async (req) => {
       const { error } = await sb.from("instancia_ghl")
         .update({ pausada_em: null, pausada_motivo: null }).eq("instancia", NOME_INST);
       if (error) throw error;
-      const solto = await avisar(sb, cfg, NOME_INST, FONE,
+      const solto = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca: ${NOME_INST} liberada`,
         `✅ ${NOME_INST} liberada.\n\n${seguradas} mensagem(ns) da cobrança volta(m) a sair agora, no ritmo normal (cerca de 2 por minuto, não de uma vez).`);
       await sb.from("cobranca_config").update({
         vigia_estado: { estado: "ok", desde: new Date().toISOString(), ultimo_aviso_em: new Date().toISOString() },
@@ -98,17 +99,17 @@ Deno.serve(async (req) => {
 
     let aviso: { ok: boolean; motivo?: string } = { ok: false };
     if (mudou && estado === "caida") {
-      aviso = await avisar(sb, cfg, NOME_INST, FONE,
+      aviso = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca PARADA: o WhatsApp ${NOME_INST} caiu`,
         `⚠️ O WhatsApp da cobrança (${NOME_INST}) caiu às ${qdo(inst.pausada_em)}.\n\n` +
         `A cobrança PAROU de enviar sozinha — nada fica se acumulando às cegas.\n` +
         `${seguradas} mensagem(ns) estão seguradas.\n\n` +
         `Motivo registrado: ${inst.pausada_motivo || "queda detectada no envio"}\n\n` +
         `Quando reconectar o número na Zaptos, abra este link para liberar:\n${linkLiberar}`);
     } else if (mudou && estado === "ok") {
-      aviso = await avisar(sb, cfg, NOME_INST, FONE,
+      aviso = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca: ${NOME_INST} voltou`,
         `✅ ${NOME_INST} voltou. ${seguradas} mensagem(ns) da cobrança volta(m) a sair no ritmo normal.`);
     } else if (estado === "caida" && podeLembrar(horaSp(), estadoAnterior.ultimo_aviso_em, ESPERA)) {
-      aviso = await avisar(sb, cfg, NOME_INST, FONE,
+      aviso = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca ainda parada: ${NOME_INST} fora do ar`,
         `⏳ O WhatsApp da cobrança (${NOME_INST}) continua fora do ar há ${ha(inst.pausada_em)}.\n\n` +
         `${seguradas} mensagem(ns) seguradas, e a cobrança do dia não está saindo.\n\n` +
         `Reconectou? libere aqui:\n${linkLiberar}`);
@@ -126,7 +127,7 @@ Deno.serve(async (req) => {
       },
     }).eq("id", 1);
 
-    return j({ ok: true, instancia: NOME_INST, estado, mudou, avisado: aviso.ok, aviso_falhou: aviso.motivo || null, seguradas, desde: inst.pausada_em });
+    return j({ ok: true, instancia: NOME_INST, estado, mudou, avisado: aviso.ok, canais: { whatsapp: aviso.wpp || null, email: aviso.email || null }, aviso_falhou: aviso.motivo || null, seguradas, desde: inst.pausada_em });
   } catch (e) { return j({ ok: false, erro: String(e) }, 500); }
 });
 
@@ -136,26 +137,47 @@ Deno.serve(async (req) => {
  * teto por minuto de sempre. `contact_id` vai nulo de proposito: o trilho resolve o contato
  * pelo telefone, e nao ha por que criar contato de CRM para um aviso interno.
  */
-async function avisar(sb: any, cfg: any, caiu: string, fone: string, texto: string): Promise<{ ok: boolean; motivo?: string }> {
-  if (!fone) return { ok: false, motivo: "cobranca_config.alerta_fone esta vazio" };
+async function avisar(
+  sb: any, cfg: any, caiu: string, fone: string, email: string, assunto: string, texto: string,
+): Promise<{ ok: boolean; motivo?: string; wpp?: string; email?: string }> {
+  const notas: string[] = [];
+  let wpp = "nao enfileirado", mail = "nao enfileirado";
 
-  let quem = String(cfg?.alerta_instancia || "");
-  if (!quem) {
-    // prefere uma instancia da casa (escopo lead/cliente) a usar o numero pessoal de alguem
-    const { data } = await sb.from("instancia_ghl").select("instancia,escopo")
-      .eq("ativa", true).is("pausada_em", null).neq("instancia", caiu);
-    const vivas = data || [];
-    quem = (vivas.find((x: any) => x.escopo === "lead") || vivas.find((x: any) => x.escopo === "cliente") || vivas[0])?.instancia || "";
+  // UM INSERT POR CANAL, e nao um lote com os dois. O PostgREST exige que todas as linhas de
+  // um lote tenham EXATAMENTE as mesmas chaves, e a linha de WhatsApp (fone, mensagem,
+  // instancia) nao tem as do e-mail (email, assunto, corpo): mandados juntos, o lote inteiro
+  // e recusado e o aviso nao sai por canal nenhum — que e o contrario do que este codigo existe
+  // para garantir. Separados, um canal cair nao leva o outro junto.
+  const grava = async (linha: any): Promise<string> => {
+    // `empresa` e o CODIGO de texto da tabela empresa ('nitron'), com chave estrangeira. A
+    // primeira versao mandou o numero 1, o insert morreu na FK e o erro era engolido: a funcao
+    // respondia "avisado: false" sem dizer por que. Um vigia que falha calado nao vigia nada.
+    const { error } = await sb.from("fila_envio").insert({
+      ...linha, campanha: "cobranca_alerta", publico: "interno", empresa: "nitron", status: "pendente",
+      nome: "Alerta da cobranca",
+    });
+    return error ? "erro: " + error.message : "na fila";
+  };
+
+  /* ---- WhatsApp: por OUTRA instancia, que a que caiu nao avisa que caiu ---- */
+  if (!fone) notas.push("alerta_fone vazio");
+  else {
+    let quem = String(cfg?.alerta_instancia || "");
+    if (!quem) {
+      // prefere uma instancia da casa (escopo lead/cliente) a usar o numero pessoal de alguem
+      const { data } = await sb.from("instancia_ghl").select("instancia,escopo")
+        .eq("ativa", true).is("pausada_em", null).neq("instancia", caiu);
+      const vivas = data || [];
+      quem = (vivas.find((x: any) => x.escopo === "lead") || vivas.find((x: any) => x.escopo === "cliente") || vivas[0])?.instancia || "";
+    }
+    if (!quem) notas.push("sem instancia viva para o WhatsApp");
+    else wpp = await grava({ canal: "whatsapp", fone, mensagem: texto, instancia: quem });
   }
-  if (!quem) return { ok: false, motivo: "nenhuma instancia viva para mandar o aviso" };
 
-  // `empresa` e o CODIGO de texto da tabela empresa ('nitron'), com chave estrangeira. A
-  // primeira versao mandou o numero 1 e o insert morreu na FK — e, pior, o erro era engolido
-  // e a funcao respondia "avisado: false" sem dizer por que. Um vigia que falha calado nao
-  // vigia nada: por isso o motivo agora sobe na resposta.
-  const { error } = await sb.from("fila_envio").insert({
-    canal: "whatsapp", fone, nome: "Alerta da cobranca", mensagem: texto,
-    instancia: quem, campanha: "cobranca_alerta", publico: "interno", empresa: "nitron", status: "pendente",
-  });
-  return error ? { ok: false, motivo: "fila_envio: " + error.message } : { ok: true };
+  /* ---- e-mail: sem dono e sem instancia, e por isso o canal que sobrevive a queda ---- */
+  if (!email) notas.push("alerta_email vazio");
+  else mail = await grava({ canal: "email", email, assunto, corpo: texto.replace(/\n/g, "<br>") });
+
+  const algum = wpp === "na fila" || mail === "na fila";
+  return { ok: algum, motivo: notas.length ? notas.join("; ") : undefined, wpp, email: mail };
 }

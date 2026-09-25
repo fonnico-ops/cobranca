@@ -1,4 +1,4 @@
-// cobranca-vigia (v2) — olha o numero de WhatsApp da cobranca e AVISA uma pessoa quando ele cai.
+// cobranca-vigia (v3) — olha o numero de WhatsApp da cobranca e AVISA uma pessoa quando ele cai.
 //
 // POR QUE EXISTE. Em 24/09 as 18:24 o ZaptosWPP escreveu, dentro da propria conversa, que a
 // "Nina Financeiro" estava desconectada. O trilho compartilhado fez a parte dele: pausou a
