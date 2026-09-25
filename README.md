@@ -16,7 +16,7 @@ Roda como Edge Functions no projeto Supabase `integracao-crm-sankhya`
   Sankhya (TGFFIN, TGFCTT, TGFPAR)
          │
          ▼
-  1. cobranca-titulos-refresh   quem deve, quanto, e para quem falar
+  1. cobranca-refresh   quem deve, quanto, e para quem falar
          │   → cobranca_titulo · cobranca_contato
          ▼
   2. cobranca-boleto            desenha o PDF e hospeda no Storage
@@ -336,7 +336,7 @@ sql/008_conversa.sql                     cobranca_conversa e a cadência
 sql/009_origem_do_titulo.sql             de onde vem o boleto (e o que o ERP não tem)
 sql/010_cron_conversa.sql                os jobs do atendimento e da cadência
 supabase/functions/
-  cobranca-titulos-refresh/index.ts      Sankhya → cobranca_titulo + cobranca_contato
+  cobranca-refresh/index.ts      Sankhya → cobranca_titulo + cobranca_contato
   cobranca-boleto/index.ts               orquestra a renderização e o upload
   cobranca-boleto/boleto_pdf.ts          o gerador de PDF, sem dependência
   cobranca-montar/index.ts               monta os cards e escreve as mensagens

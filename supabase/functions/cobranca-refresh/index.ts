@@ -1,4 +1,6 @@
-// cobranca-titulos-refresh (v7) — espelha do Sankhya os titulos abertos que interessam a
+// cobranca-refresh (v8) — publicado com este nome; a pasta chamava-se cobranca-titulos-refresh
+// e o cobranca-cron chamava a copia velha desse nome, que nao grava dt_impressao nem fase futuro.
+// cobranca-refresh (v7) — espelha do Sankhya os titulos abertos que interessam a
 // cobranca (vencidos + a vencer na janela) e resolve PARA QUEM mandar cada um.
 //
 // Duas escritas, duas tabelas:

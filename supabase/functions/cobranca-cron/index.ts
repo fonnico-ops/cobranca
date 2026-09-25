@@ -1,11 +1,19 @@
-// cobranca-cron (v1) — a cadencia. Chamado 1x por hora; ele mesmo decide se e a hora.
+// cobranca-cron (v2) — a cadencia. Chamado 1x por hora; ele mesmo decide se e a hora.
+//
+// v2: chamava `cobranca-titulos-refresh`, que e uma COPIA VELHA ainda publicada. O refresh
+//     de verdade esta publicado como `cobranca-refresh` (e e ele que os crons do 014 usam).
+//     Com o nome errado, toda rodada de seg/qua/sex reescrevia o espelho sem `dt_impressao`
+//     e sem a fase `futuro` — ou seja, apagava justamente o que o cobranca-emitidos usa para
+//     achar o boleto recem-registrado no banco — e sem `boleto_geravel`, o que faz o cliente
+//     da Grafeno ouvir "providencio a 2a via" de um boleto que o banco emitiu. O nome da
+//     pasta no repositorio agora e o mesmo da funcao publicada, para o erro nao voltar.
 //
 // Cadencia escolhida pelo gestor:
 //   vencidos   segunda, quarta e sexta, de manha
 //   a vencer   sexta de manha (o aviso da semana seguinte)
 //
 // A ORDEM IMPORTA e por isso o encadeamento e serial:
-//   1. cobranca-titulos-refresh   o Sankhya manda: quem deve, quanto, e ha quanto tempo
+//   1. cobranca-refresh           o Sankhya manda: quem deve, quanto, e ha quanto tempo
 //   2. cobranca-boleto            rende o PDF do que tem linha digitavel
 //   3. cobranca-montar            monta os cards com o boleto JA hospedado
 //   4. cobranca-aprovar           so quando cobranca_config.auto_aprovar estiver ligado
@@ -60,7 +68,7 @@ Deno.serve(async (req) => {
 
     const passos: any[] = [];
     // 1. o Sankhya e a fonte da verdade; sem ele nao ha o que cobrar
-    const refresh = await chamar("cobranca-titulos-refresh", {});
+    const refresh = await chamar("cobranca-refresh", {});
     passos.push(refresh);
     if (!refresh.ok) return j({ ok: false, fase, erro: "o refresh do Sankhya falhou — nada foi montado nem disparado", passos }, 502);
 

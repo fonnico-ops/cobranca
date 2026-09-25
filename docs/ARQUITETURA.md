@@ -210,7 +210,7 @@ aprovar por ela.
 ## 6. Ordem do encadeamento
 
 ```
-cobranca-titulos-refresh  →  cobranca-boleto  →  cobranca-montar  →  cobranca-aprovar
+cobranca-refresh  →  cobranca-boleto  →  cobranca-montar  →  cobranca-aprovar
 ```
 
 Montar antes de renderizar o boleto produziria card sem anexo, dizendo ao cliente que o boleto

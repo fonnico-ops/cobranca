@@ -141,7 +141,7 @@ alter table public.cobranca_config enable row level security;
 
 insert into public.cobranca_config (id) values (1) on conflict (id) do nothing;
 
-comment on table public.cobranca_titulo  is 'Espelho do TGFFIN aberto (vencido + a vencer na janela), com os dados do boleto e o PDF hospedado. Reescrito a cada cobranca-titulos-refresh.';
+comment on table public.cobranca_titulo  is 'Espelho do TGFFIN aberto (vencido + a vencer na janela), com os dados do boleto e o PDF hospedado. Reescrito a cada cobranca-refresh.';
 comment on table public.cobranca_contato is 'Contato de cobranca resolvido por parceiro. prioridade menor = melhor: 10 RESPCOBRANCA/RECEBEBOLETOEMAIL, 20 dpto Financeiro, 30 outro contato Sankhya, 40 cadastro do parceiro, 50 CRM.';
 comment on table public.cobranca_fila    is 'Fila de aprovacao e historico. 1 linha por rodada/fase/grupo (matriz). A unique key torna o montar idempotente no dia.';
 comment on table public.cobranca_config  is 'Parametros do motor de cobranca. ativo=false trava tudo; auto_aprovar=false exige o painel.';
