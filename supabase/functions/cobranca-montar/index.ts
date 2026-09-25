@@ -1,4 +1,4 @@
-// cobranca-montar (v9) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v10) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -40,6 +40,12 @@
 //      linha. Ver linhasTitulos().
 //   2. SAUDACAO. A cobranca abria com "Ola, 001!" — o "nome do contato" vinha do cadastro do
 //      parceiro e era a razao social "001 - INTERLAGOS - SP". Ver primeiroNome().
+//
+// v10: montar de novo na MESMA rodada agora apaga os cards 'aguardando' que esta montagem
+//      nao escolheu. Sem isso eles ficavam na tela com a divida de horas atras: em 25/09
+//      sobraram 4, todos com titulo ja pago. O aprovar os recusaria (a conferencia de NUFIN
+//      pega), mas cobranca que nao vai sair nao deveria aparecer para aprovar. O que ja saiu
+//      nao e tocado.
 //
 // POST { fase: "vencido" | "a_vencer", rodada?: "YYYY-MM-DD", limite?: n, seco?: true }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -526,9 +532,28 @@ Deno.serve(async (req) => {
       gravados += gravar.slice(i, i + 100).length;
     }
 
+    /* ---- o que SOBROU de uma montagem anterior desta mesma rodada -------------------
+       Rodar o montar de novo no mesmo dia (depois de um refresh, por exemplo) escolhe um
+       conjunto diferente: quem pagou sai, quem venceu entra, e a ordem por valor muda. Os
+       cards da montagem anterior que nao foram reescritos ficavam na tela com a divida de
+       horas atras — em 25/09 sobraram 4 assim, todos com titulo ja baixado. O aprovar os
+       recusa (a conferencia de NUFIN pega), mas ninguem deveria ver na tela uma cobranca
+       que nao vai sair. Card 'aguardando' e rascunho: se esta montagem nao o escolheu, ele
+       nao existe. O que ja saiu (enfileirado/aprovado/recusado) nao e tocado. */
+    const ficam = new Set(escolhidos.map((c) => Number(c.grupo)));
+    const { data: sobraram } = await sb.from("cobranca_fila").select("id,grupo")
+      .eq("rodada", rodada).eq("fase", fase).eq("status", "aguardando");
+    const velhos = (sobraram || []).filter((x: any) => !ficam.has(Number(x.grupo))).map((x: any) => Number(x.id));
+    if (velhos.length) {
+      const { error } = await sb.from("cobranca_fila").delete().in("id", velhos);
+      if (error) throw error;
+    }
+
     return j({
       ok: true, fase, rodada, gravados,
       preservados: escolhidos.length - gravar.length,
+      // cards de uma montagem anterior desta rodada que esta nao escolheu, e que sairam da tela
+      descartados: velhos.length,
       grupos_elegiveis: cards.length, teto: CAP,
       valor: Math.round(gravar.reduce((a, c) => a + c.valor, 0)),
       com_boleto: gravar.filter((c) => c.boletos.length).length,
