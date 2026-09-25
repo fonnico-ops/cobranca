@@ -1,4 +1,4 @@
-// cobranca-painel (v4) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v5) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -23,6 +23,12 @@
 //         inteira, e sem isso o primeiro clique cairia no 401.
 //     E como o link agora e publico e o repositorio tambem, `cobranca_config.painel_chave`
 //     passou a valer: sem `?k=` certo, nem GET nem POST.
+//
+// v5: o botao postava em `API + location.search`, e no navegador a barra de enderecos da
+//     casca NAO tem a chave (a casca a monta por dentro, ou a guarda no proprio navegador).
+//     Resultado: o POST saia sem `?k=`, batia no 401 e o "Aprovar e disparar" nao fazia
+//     nada. Agora o servidor injeta no HTML a URL COMPLETA do POST — a mesma query que ele
+//     acabou de aceitar no GET, chave inclusive — e o navegador nao precisa adivinhar nada.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=conversas | ?aba=saude&dias=30
@@ -144,7 +150,7 @@ async function manda(acao){
   if(!confirm("Confirma "+verbo+" "+ids.length+" grupo(s)?\\n\\nNo aprovar, as mensagens saem de verdade para os clientes.")) return;
   $("#aprovar").disabled=true;$("#recusar").disabled=true;aviso("Processando "+ids.length+"\\u2026");
   try{
-    const r=await fetch(API+location.search,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao,ids})});
+    const r=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao,ids})});
     const d=await r.json();
     if(!d.ok) throw new Error(d.erro||"falhou");
     aviso(acao==="aprovar"
@@ -584,7 +590,8 @@ Deno.serve(async (req) => {
 
     return new Response(pagina(cards || [], {
       rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true, sufixo,
-      api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel",
+      // com a query inteira: e por ela que a chave chega ao POST
+      api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel" + u.search,
     }), {
       headers: { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
     });
