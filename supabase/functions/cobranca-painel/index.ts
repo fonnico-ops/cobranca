@@ -1,4 +1,4 @@
-// cobranca-painel (v6) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v7) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -36,6 +36,13 @@
 //     nada?" (o numero esta pausado). Com o WhatsApp caido a faixa fica ambar e diz
 //     quantos saem por e-mail agora e quantos so tem WhatsApp e ficam para a proxima.
 //
+// v7: duas perguntas que a tela nao respondia. (1) O QUE ACONTECEU com o que ja foi
+//     aprovado: o card congelava em "enfileirado", que e o estado do momento do clique;
+//     agora cada envio mostra o estado ATUAL da fila_envio — entregue e a que horas, na
+//     fila desde quando, ou o erro. (2) O QUE VEM DEPOIS: a tela terminava nos 60 do teto,
+//     sem dizer que ha mais grupos esperando a vez. Agora o rodape traz a previa, com o
+//     total e em quantas rodadas a carteira e coberta no ritmo atual.
+//
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=conversas | ?aba=saude&dias=30
 // POST { acao:"aprovar"|"recusar", ids:[...] } -> repassa ao cobranca-aprovar
@@ -66,6 +73,66 @@ const ORIGEM_COR: Record<string, string> = {
   sankhya_respcobranca: "#0a7", sankhya_financeiro: "#0a7",
   sankhya_contato: "#c80", parceiro_sankhya: "#c80", crm: "#888",
 };
+
+/**
+ * O que ACONTECEU com um card que ja foi aprovado.
+ *
+ * Aprovar nao e entregar. O e-mail sai na hora, mas o WhatsApp e escrito na fila e sai
+ * espacado — e ate ontem a tela dizia so "enfileirado", que e a informacao do momento do
+ * clique e nao a de agora. Quem aprovou 60 grupos ficava sem saber quantos chegaram,
+ * quantos ainda estao na fila e quantos deram erro, que e exatamente a pergunta seguinte.
+ *
+ * A verdade esta em fila_envio: `status` e `enviado_em` por linha. O card guarda os ids em
+ * `fila_ids` (WhatsApp) e o resultado do e-mail em `envios`.
+ */
+function entrega(c: any, entregas: Record<string, any>): string {
+  if (c.status === "aguardando") return "";
+  const envios: any[] = Array.isArray(c.envios) ? c.envios : [];
+  const selo = (txt: string, cor: string) => `<span class="selo" style="background:${cor}">${esc(txt)}</span>`;
+  const linhas: string[] = [];
+
+  for (const e of envios) {
+    if (e.canal === "email") {
+      linhas.push(e.ok ? selo("e-mail enviado", "#0a7") : selo("e-mail falhou: " + String(e.motivo || "").slice(0, 60), "#c0392b"));
+      continue;
+    }
+    // WhatsApp: o que vale e o estado ATUAL da linha na fila, nao o do momento do clique
+    const f = entregas[String(e.fila_id)];
+    if (!f) { linhas.push(e.ok ? selo("WhatsApp na fila", "#c60") : selo("WhatsApp falhou: " + String(e.motivo || "").slice(0, 60), "#c0392b")); continue; }
+    if (f.status === "enviado") linhas.push(selo("WhatsApp entregue " + hhmm(f.enviado_em), "#0a7"));
+    else if (f.status === "erro") linhas.push(selo("WhatsApp erro: " + String(f.resultado || "").slice(0, 70), "#c0392b"));
+    else linhas.push(selo("WhatsApp na fila desde " + hhmm(f.criado_em), "#c60"));
+  }
+  return linhas.length ? `<div class="entrega">${linhas.join("")}</div>` : "";
+}
+const hhmm = (t: any) => t ? new Date(t).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }) : "";
+
+/**
+ * O QUE VEM DEPOIS DESTA RODADA.
+ *
+ * A tela mostrava so os 60 do teto e terminava ali. Quem olha nao tinha como saber que
+ * existem mais 139 grupos esperando a vez, nem quanto eles somam — e sem isso o teto vira
+ * uma decisao no escuro: nao da para responder "em quantas rodadas eu limpo a carteira?".
+ *
+ * A lista e uma PREVIA, e a tela diz isso. A selecao definitiva e feita pelo cobranca-montar
+ * na hora da proxima rodada, com o espelho recem-lido do Sankhya: quem pagar ate la sai
+ * sozinho, e quem vencer no meio entra. Prometer aqui a lista exata seria mentir sobre dado
+ * que ainda vai mudar.
+ */
+function filaDepois(ctx: any): string {
+  const p = ctx.proximos;
+  if (!p || !p.grupos) return "";
+  const linhas = (p.lista || []).map((g: any) =>
+    `<tr><td>${esc(g.nome || "grupo " + g.grupo)}</td><td class="num">${g.titulos}</td><td class="num">${brl(g.valor)}</td></tr>`).join("");
+  return `<section class="depois">
+    <h2>Depois desta rodada: ${p.grupos} grupo(s), ${brl(p.valor)}</h2>
+    <p class="nota">Prévia pela dívida, do maior para o menor. A lista definitiva é montada na próxima rodada
+      (${esc(p.quando)}) com os títulos relidos do Sankhya — quem pagar até lá sai sozinho, e quem vencer entra.
+      No ritmo de hoje (${p.teto} grupos por rodada), a carteira leva cerca de ${p.rodadas} rodada(s).</p>
+    ${linhas ? `<table><tr><th>cliente</th><th>títulos</th><th>valor</th></tr>${linhas}</table>` : ""}
+    ${p.grupos > (p.lista || []).length ? `<p class="nota">… e mais ${p.grupos - (p.lista || []).length} grupo(s).</p>` : ""}
+  </section>`;
+}
 
 function pagina(cards: any[], ctx: any): string {
   const total = cards.reduce((a, c) => a + Number(c.valor || 0), 0);
@@ -113,6 +180,7 @@ function pagina(cards: any[], ctx: any): string {
       </div>
       ${destino(wpp, "WhatsApp")}${destino(mail, "E-mail")}
       <pre class="msg">${esc(c.mensagem)}</pre>
+      ${entrega(c, ctx.entregas)}
       ${c.status !== "aguardando" ? `<div class="jasaiu">${esc(c.status)}${c.motivo ? " — " + esc(c.motivo) : ""}</div>` : ""}
     </article>`;
   }).join("");
@@ -145,6 +213,15 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .jasaiu{margin-top:8px;font-size:12.5px;color:var(--mut)}
 #aviso{padding:10px 12px;border-radius:8px;margin:10px 0;display:none}
 .ritmo{font-size:13px;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 11px;margin:0 0 12px}
+.entrega{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.selo{font-size:11.5px;color:#fff;padding:2px 9px;border-radius:99px}
+.depois{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:18px 0}
+.depois h2{font-size:15px;margin:0 0 6px}
+.depois .nota{color:var(--mut);font-size:12.5px;margin:6px 0}
+.depois table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
+.depois th,.depois td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd);overflow-wrap:anywhere}
+.depois th{color:var(--mut);font-weight:600;font-size:12px}
+.depois td.num{text-align:right;white-space:nowrap}
 .alerta{font-size:13.5px;background:#fff4e5;color:#7a3e00;border:1px solid #f0c78a;border-radius:8px;padding:10px 12px;margin:0 0 12px}
 @media(prefers-color-scheme:dark){:root:not([data-theme=light]) .alerta{background:#3a2a12;color:#f0c78a;border-color:#6b4a1f}}
 .vazio-tudo{text-align:center;color:var(--mut);padding:60px 20px}
@@ -167,6 +244,7 @@ ${ctx.wppPausado
 </div>
 <div id="aviso"></div>
 ${cards.length ? cartoes : '<div class="vazio-tudo">Nada aguardando aprovação nesta rodada.<br>Rode o <code>cobranca-montar</code> para montar a fila.</div>'}
+${filaDepois(ctx)}
 </div><script>
 const API=${JSON.stringify(ctx.api)};
 const $=(s)=>document.querySelector(s), $$=(s)=>[...document.querySelectorAll(s)];
@@ -559,6 +637,49 @@ async function dadosSaude(sb: any, dias: number) {
   };
 }
 
+/**
+ * A previa do proximo lote: quem NAO coube nesta rodada.
+ *
+ * Repete as regras do cobranca-montar de proposito (valor minimo, faixa de atraso, grupo
+ * pela matriz, `nao_perturbe` fora) — nao da para importar dali, cada Edge Function e um
+ * deploy independente. Se as regras divergirem, esta tela erra para MENOS ou para MAIS na
+ * previa, e nunca no que sai: quem decide o envio continua sendo o montar.
+ */
+async function previaProximos(sb: any, cfg: any, cards: any[], fase: string) {
+  const VALOR_MIN = Number(cfg?.valor_min ?? 50);
+  const ATRASO_MIN = Number(cfg?.atraso_min ?? 1);
+  const ATRASO_MAX = Number(cfg?.atraso_max ?? 180);
+  const TETO = Number(cfg?.cap_grupos_run ?? 40);
+
+  const titulos = await todas((de, ate) =>
+    sb.from("cobranca_titulo").select("codparc,matriz,valor,dias_atraso,sacado").eq("fase", fase).order("nufin").range(de, ate));
+
+  const { data: silencio } = await sb.from("cobranca_conversa").select("grupo").eq("nao_perturbe", true);
+  const mudos = new Set((silencio || []).map((x: any) => String(x.grupo)));
+  const nestaRodada = new Set(cards.map((c: any) => String(c.grupo)));
+
+  const grupos = new Map<string, any>();
+  for (const t of titulos) {
+    if (Number(t.valor) < VALOR_MIN) continue;
+    if (fase === "vencido" && !(Number(t.dias_atraso) >= ATRASO_MIN && Number(t.dias_atraso) <= ATRASO_MAX)) continue;
+    const g = String(t.matriz || t.codparc);
+    if (mudos.has(g) || nestaRodada.has(g)) continue;
+    const acc = grupos.get(g) || { grupo: g, nome: t.sacado || null, valor: 0, titulos: 0 };
+    acc.valor += Number(t.valor); acc.titulos++;
+    if (!acc.nome && t.sacado) acc.nome = t.sacado;
+    grupos.set(g, acc);
+  }
+  const fila = [...grupos.values()].sort((a, b) => b.valor - a.valor);
+  const valor = fila.reduce((a, g) => a + g.valor, 0);
+  // quantas rodadas para zerar, contando a de hoje
+  const rodadas = Math.max(1, Math.ceil((fila.length + cards.length) / Math.max(1, TETO)));
+  return {
+    grupos: fila.length, valor, teto: TETO, rodadas,
+    quando: fase === "vencido" ? "segunda, quarta ou sexta, 9h" : "sexta, 9h",
+    lista: fila.slice(0, 15),
+  };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
@@ -626,13 +747,30 @@ Deno.serve(async (req) => {
       sb.from("instancia_ghl").select("pausada_em").eq("instancia", cfg?.instancia || "Nina").maybeSingle(),
       sb.from("fila_config").select("wpp_intervalo_seg").eq("id", 1).maybeSingle(),
     ]);
+
+    /* ---- o que ACONTECEU com o que ja foi aprovado ------------------------------------
+       O card guarda o id da linha da fila; o estado de verdade (entregue, na fila, erro)
+       muda depois, na fila_envio. Sem esta leitura a tela congela no "enfileirado" do
+       momento do clique, que e a informacao menos util depois que o disparo comeca. */
+    const ids = (cards || []).flatMap((c: any) => Array.isArray(c.fila_ids) ? c.fila_ids.map(Number) : []).filter(Boolean);
+    const entregas: Record<string, any> = {};
+    for (let i = 0; i < ids.length; i += 500) {
+      const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado").in("id", ids.slice(i, i + 500));
+      for (const f of (data || [])) entregas[String(f.id)] = f;
+    }
+
+    /* ---- o que vem DEPOIS desta rodada (previa) ---------------------------------------
+       Mesmas regras do montar: valor minimo, faixa de atraso, agrupado pela matriz, sem
+       quem pediu para nao receber. Nao repete quem ja esta nesta rodada. E previa, e a tela
+       diz isso: a selecao real acontece no proximo montar, com o Sankhya relido. */
+    const proximos = await previaProximos(sb, cfg, cards || [], fase);
     const pausadaEm = instR.data?.pausada_em || null;
     // 1,2 = o que o processador acrescenta ao intervalo configurado (ver o comentario em pagina())
     const segPorMsg = Math.round(Number(ritmoR.data?.wpp_intervalo_seg ?? 45) * 1.2);
 
     return new Response(pagina(cards || [], {
       rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true, sufixo,
-      wppPausado: !!pausadaEm, segPorMsg,
+      wppPausado: !!pausadaEm, segPorMsg, entregas, proximos,
       pausadaDesde: pausadaEm ? new Date(pausadaEm).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "",
       // com a query inteira: e por ela que a chave chega ao POST
       api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel" + u.search,

@@ -1,0 +1,41 @@
+# Publica a casca do painel (docs/) no GitHub Pages.
+#
+# Existe porque o dominio supabase.co nao entrega pagina: a Edge Function e o Storage devolvem
+# `text/plain` + `nosniff` para qualquer HTML, e o navegador mostra o codigo-fonte. O Pages
+# serve HTML de verdade; a casca em docs/painel.html busca a tela na funcao e a escreve.
+#
+# `enablement: true` no configure-pages liga o Pages na primeira execucao — sem isso alguem
+# teria de abrir as configuracoes do repositorio a mao.
+name: painel
+
+on:
+  push:
+    branches: [claude/wonderful-davinci-9r9huh]
+    paths: ["docs/**", ".github/workflows/painel.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4
