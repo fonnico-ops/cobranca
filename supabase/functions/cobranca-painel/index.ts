@@ -207,7 +207,21 @@ function filaDepois(ctx: any): string {
   </section>`;
 }
 
-function pagina(cards: any[], ctx: any): string {
+function pagina(todos: any[], ctx: any): string {
+  /* A TELA DE APROVACAO MOSTRA SO O QUE FALTA APROVAR.
+     Ate 07/10 ela listava a rodada inteira: o que ja tinha saido ficava ali, cinza e sem
+     caixinha, no meio do que ainda precisava de decisao. O gestor disse o obvio — "o certo e
+     os que ja enviamos sair da tela de a enviar". Lista de trabalho com item concluido dentro
+     e lista que ninguem confia: a pessoa reconfere card por card para achar o que falta.
+     Entao:
+       - `aguardando`  fica aqui, com caixinha;
+       - `enfileirado` sai da tela e vira uma linha de resumo com o caminho para a aba
+         Entregas, que mostra mensagem por mensagem o que saiu e o que chegou;
+       - `erro` e `sem_contato` FICAM, separados embaixo: nao sairam e ninguem decidiu nada
+         sobre eles — some-los seria esconder trabalho pendente, que e o oposto do pedido. */
+  const cards = todos.filter((c: any) => c.status === "aguardando");
+  const jaSairam = todos.filter((c: any) => c.status === "enfileirado" || c.status === "aprovado");
+  const naoSairam = todos.filter((c: any) => c.status === "erro" || c.status === "sem_contato");
   const total = cards.reduce((a, c) => a + Number(c.valor || 0), 0);
 
   /* QUANTO TEMPO ISTO VAI LEVAR, antes de clicar.
@@ -217,7 +231,7 @@ function pagina(cards: any[], ctx: any): string {
      na rodada e o intervalo dividido pelos numeros de pe — com um numero fora do ar, a
      mesma rodada leva o dobro, e a tela precisa dizer isso ANTES do clique.
      O e-mail sai na hora e por isso nao entra na conta. */
-  const aguardando = cards.filter((c: any) => c.status === "aguardando");
+  const aguardando = cards;
   const temCanal = (c: any, canal: string) => (Array.isArray(c.contatos) ? c.contatos : []).some((x: any) => x.canal === canal);
   const porWpp = aguardando.filter((c: any) => temCanal(c, "whatsapp")).length;
   const porMail = aguardando.filter((c: any) => temCanal(c, "email")).length;
@@ -232,6 +246,30 @@ function pagina(cards: any[], ctx: any): string {
   const sobraHoje = Math.max(0, (Number(ctx.janelaAte ?? 20) - Math.max(horaAgora, Number(ctx.janelaDe ?? 8))) * 60);
   ctx.terminaEm = minutos <= sobraHoje ? "hoje" : `amanhã (a janela de cobrança fecha às ${Number(ctx.janelaAte ?? 20)}h e reabre às ${Number(ctx.janelaDe ?? 8)}h)`;
   const tempo = minutos < 1 ? "menos de 1 min" : (minutos < 90 ? `${minutos} min` : `${Math.floor(minutos / 60)}h${String(minutos % 60).padStart(2, "0")}`);
+
+  /* O QUE NAO SAIU. Nao e lixo nem historico: e trabalho parado. Um card em `erro` costuma
+     ser cadastro (contato sem e-mail no CRM, numero que o validador recusou) e volta na
+     proxima montagem — mas se ninguem ver o motivo, ele volta a falhar igual, rodada apos
+     rodada. Por isso fica na tela, com o motivo inteiro, separado do que espera decisao. */
+  const bloqueados = naoSairam.length ? `<section class="paradas">
+    <h2>Não saíram (${naoSairam.length}) — ${brl(naoSairam.reduce((a: number, c: any) => a + Number(c.valor || 0), 0))}</h2>
+    <p class="nota">Estes não foram enviados e não precisam de aprovação: precisam de conserto no cadastro.
+      Eles voltam sozinhos na próxima montagem.</p>
+    ${naoSairam.map((c: any) => `<div class="parada">
+      <b>${esc(c.nome || "grupo " + c.grupo)}</b> <span class="mut">${brl(c.valor)}</span>
+      <div class="mut">${esc(c.motivo || c.status)}</div>
+      ${entrega(c, ctx.porCard, ctx.fila)}</div>`).join("")}
+  </section>` : "";
+
+  /* O QUE JA SAIU vira UMA LINHA, com o caminho para a aba Entregas. O detalhe por mensagem
+     (entregue, saiu, na fila, erro, por qual numero) mora la — aqui ele so competiria com o
+     que ainda precisa de decisao. */
+  const saiuResumo = jaSairam.length ? `<div class="saiu">
+    <b>${jaSairam.length} grupo(s) já disparados nesta rodada</b> · ${brl(jaSairam.reduce((a: number, c: any) => a + Number(c.valor || 0), 0))}
+    — saíram desta tela de propósito.
+    <a href="?aba=entregas${ctx.sufixo}">ver mensagem por mensagem &rarr;</a>
+  </div>` : "";
+
   const cartoes = cards.map((c) => {
     const contatos = (Array.isArray(c.contatos) ? c.contatos : []);
     const wpp = contatos.find((x: any) => x.canal === "whatsapp");
@@ -244,7 +282,7 @@ function pagina(cards: any[], ctx: any): string {
       : `<div class="dest vazio"><b>${rotulo}</b> sem contato</div>`;
     return `<article class="card" data-id="${c.id}">
       <header>
-        <label><input type="checkbox" class="sel" value="${c.id}"${c.status === "aguardando" ? " checked" : " disabled"}></label>
+        <label><input type="checkbox" class="sel" value="${c.id}" checked></label>
         <div class="tit"><h3>${esc(c.nome || "grupo " + c.grupo)}</h3>
           <div class="meta">${c.n_titulos} título${c.n_titulos > 1 ? "s" : ""}
             ${c.fase === "vencido" ? ` · maior atraso <b>${c.maior_atraso}d</b>` : ""}
@@ -260,8 +298,7 @@ function pagina(cards: any[], ctx: any): string {
       </div>
       ${destino(wpp, "WhatsApp")}${destino(mail, "E-mail")}
       <pre class="msg">${esc(c.mensagem)}</pre>
-      ${entrega(c, ctx.porCard, ctx.fila)}
-      ${c.status !== "aguardando" ? `<div class="jasaiu">${esc(c.status)}${c.motivo ? " — " + esc(c.motivo) : ""}</div>` : ""}
+      ${c.motivo ? `<div class="jasaiu">${esc(c.motivo)}</div>` : ""}
     </article>`;
   }).join("");
 
@@ -308,10 +345,16 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .alerta{font-size:13.5px;background:#fff4e5;color:#7a3e00;border:1px solid #f0c78a;border-radius:8px;padding:10px 12px;margin:0 0 12px}
 @media(prefers-color-scheme:dark){:root:not([data-theme=light]) .alerta{background:#3a2a12;color:#f0c78a;border-color:#6b4a1f}}
 .vazio-tudo{text-align:center;color:var(--mut);padding:60px 20px}
+.saiu{font-size:13.5px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:9px 12px;margin:0 0 12px}
+.saiu a{color:var(--ac);text-decoration:none;white-space:nowrap}
+.paradas{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:18px 0}
+.paradas h2{font-size:15px;margin:0 0 6px}.paradas .nota{color:var(--mut);font-size:12.5px;margin:6px 0 10px}
+.parada{border-top:1px solid var(--bd);padding:9px 0;font-size:13.5px;overflow-wrap:anywhere}
+.mut{color:var(--mut);font-size:12.5px}
 @media(max-width:560px){.wrap{padding:12px}.card header{flex-wrap:wrap}.vlr{width:100%}}
 </style></head><body><div class="wrap">
 <h1>Cobrança — ${ctx.fase === "vencido" ? "títulos vencidos" : "a vencer na próxima semana"}</h1>
-<div class="sub">rodada ${esc(ctx.rodada)} · ${cards.length} grupo(s) · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
+<div class="sub">rodada ${esc(ctx.rodada)} · <b>${cards.length} grupo(s) esperando aprovação</b> · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
 ${ctx.wppPausado
   ? `<div class="alerta">Nenhum número da cobrança está de pé${ctx.caidas?.length ? " (" + esc(ctx.caidas.join(", ")) + ")" : ""}.
        Aprovando agora, saem <b>${porMail} por e-mail</b>, na hora.
@@ -331,7 +374,9 @@ ${ctx.wppPausado
   <button id="aprovar" class="go">Aprovar e disparar</button>
 </div>
 <div id="aviso"></div>
-${cards.length ? cartoes : '<div class="vazio-tudo">Nada aguardando aprovação nesta rodada.<br>Rode o <code>cobranca-montar</code> para montar a fila.</div>'}
+${saiuResumo}
+${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação nesta rodada.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) desta rodada já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>Rode o <code>cobranca-montar</code> para montar a fila."}</div>`}
+${bloqueados}
 ${filaDepois(ctx)}
 </div><script>
 const API=${JSON.stringify(ctx.api)};
