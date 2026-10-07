@@ -9,12 +9,26 @@
   .caixa{max-width:640px;margin:14vh auto;padding:0 18px;text-align:center}
   .erro{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;text-align:left;overflow-wrap:anywhere}
   .mut{color:var(--mut);font-size:13.5px}
+  form{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px;margin-top:8px;text-align:left}
+  input{width:100%;box-sizing:border-box;font:15px system-ui;padding:11px 12px;margin:10px 0;
+        border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg)}
+  button{font:600 15px system-ui;padding:11px 18px;border-radius:8px;border:0;background:#0b5;color:#fff;cursor:pointer}
+  #recado{color:#c0392b}
 </style>
 </head>
 <body>
 <div class="caixa" id="caixa">
-  <p>Carregando o painel da cobrança…</p>
+  <p id="carregando">Carregando o painel da cobrança…</p>
   <p class="mut">A tela vem da função; este endereço é só a casca.</p>
+
+  <form id="pedeChave" hidden>
+    <p id="motivo"><b>Cole a chave de acesso do painel.</b></p>
+    <p class="mut">Ela fica guardada neste navegador; na próxima vez o painel abre direto.</p>
+    <input id="chave" type="password" autocomplete="off" spellcheck="false"
+           placeholder="chave de acesso" aria-label="chave de acesso">
+    <button type="submit">Abrir painel</button>
+    <p class="mut" id="recado"></p>
+  </form>
 </div>
 <!--
   A CASCA DO PAINEL. Existe por uma regra da plataforma, nao por gosto: o dominio supabase.co
@@ -61,37 +75,71 @@
 (function () {
   var ENDERECO = "https://bwbeieumxcuomtrvlqxs.supabase.co/functions/v1/cobranca-painel";
 
-  // A chave vem no link. Guardar no navegador e so conveniencia: quem salvou o favorito sem
-  // a chave continua entrando neste aparelho. A chave nao mora neste arquivo — o repositorio
-  // e publico.
+  var caixa = document.getElementById("caixa");
+  var form = document.getElementById("pedeChave");
+  var campo = document.getElementById("chave");
+  var recado = document.getElementById("recado");
+  var carregando = document.getElementById("carregando");
   var q = new URLSearchParams(location.search);
-  try {
-    if (q.get("k")) localStorage.setItem("painel_k", q.get("k"));
-    else if (localStorage.getItem("painel_k")) q.set("k", localStorage.getItem("painel_k"));
-  } catch (e) { /* aba privada, site data bloqueado: segue sem lembrar */ }
 
-  fetch(ENDERECO + "?" + q.toString(), { headers: { accept: "text/html" }, cache: "no-store" })
-    .then(function (r) {
-      return r.text().then(function (t) {
-        if (r.status === 401) throw new Error(t || "link sem a chave de acesso");
-        if (!r.ok) throw new Error("a função respondeu " + r.status + ": " + t.slice(0, 200));
-        return t;
-      });
-    })
-    .then(function (html) {
-      if (html.charAt(0) !== "<") throw new Error("resposta inesperada: " + html.slice(0, 200));
-      document.open();
-      document.write(html);
-      document.close();
-    })
-    .catch(function (e) {
-      var caixa = document.getElementById("caixa");
-      if (!caixa) return;
-      caixa.innerHTML =
-        '<p class="erro"><b>Não consegui abrir o painel.</b><br>' +
-        String(e.message || e).replace(/[<>&]/g, "") + '</p>' +
-        '<p class="mut">O motor continua rodando — o que falhou foi só a tela.</p>';
-    });
+  // A chave vive no navegador de quem usa, nunca neste arquivo (o repositorio e publico) e
+  // nunca na barra de enderecos depois da primeira vez: quem colar aqui abre o painel pelo
+  // endereco limpo nas proximas vezes, e link encaminhado por engano nao leva a chave junto.
+  function guardada() { try { return localStorage.getItem("painel_k") || ""; } catch (e) { return ""; } }
+  function guardar(k) { try { localStorage.setItem("painel_k", k); } catch (e) { /* aba privada */ } }
+  function esquecer() { try { localStorage.removeItem("painel_k"); } catch (e) { /* idem */ } }
+
+  function pedirChave(msg) {
+    if (carregando) carregando.hidden = true;
+    form.hidden = false;
+    recado.textContent = msg || "";
+    campo.focus();
+  }
+
+  function erro(texto) {
+    caixa.innerHTML = '<p class="erro"><b>Não consegui abrir o painel.</b><br>' +
+      String(texto).replace(/[<>&]/g, "") + '</p>' +
+      '<p class="mut">O motor continua rodando — o que falhou foi só a tela.</p>';
+  }
+
+  function carregar(chave) {
+    if (!chave) return pedirChave();
+    var p = new URLSearchParams(location.search);
+    p.set("k", chave);
+    fetch(ENDERECO + "?" + p.toString(), { headers: { accept: "text/html" }, cache: "no-store" })
+      .then(function (r) {
+        return r.text().then(function (t) {
+          // 401 = chave errada ou vencida: esquece a guardada e pede de novo, em vez de
+          // deixar a pessoa presa num erro que ela nao sabe como resolver
+          if (r.status === 401) { esquecer(); pedirChave("Essa chave não foi aceita. Confira com quem cuida da cobrança."); return null; }
+          if (!r.ok) throw new Error("a função respondeu " + r.status + ": " + t.slice(0, 200));
+          return t;
+        });
+      })
+      .then(function (html) {
+        if (html === null) return;
+        if (html.charAt(0) !== "<") throw new Error("resposta inesperada: " + html.slice(0, 200));
+        guardar(chave);
+        // document.write de proposito: a tela da producao traz o proprio bloco de codigo, e
+        // codigo inserido por innerHTML nao executa — o botao ficaria morto.
+        document.open();
+        document.write(html);
+        document.close();
+      })
+      .catch(function (e) { erro(e.message || e); });
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var k = (campo.value || "").trim();
+    if (!k) return;
+    recado.textContent = "";
+    form.hidden = true;
+    if (carregando) { carregando.hidden = false; carregando.textContent = "Abrindo o painel…"; }
+    carregar(k);
+  });
+
+  carregar(q.get("k") || guardada());
 })();
 </script>
 </body></html>
