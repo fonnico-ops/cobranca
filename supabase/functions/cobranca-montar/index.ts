@@ -435,6 +435,12 @@ async function mcpTool(cred: { chave: string; header: string; prefixo: string },
   let d: any = {};
   try { d = JSON.parse(cru); } catch { throw new Error(`MCP ${tool}: resposta ilegivel: ${txt.slice(0, 200)}`); }
   if (d.error) throw new Error(`MCP ${tool}: ${d.error.message || JSON.stringify(d.error).slice(0, 200)}`);
+  // a tool pode responder 200 com `isError` e o motivo em texto — medido em 07/10 com
+  // "Erro: Nenhum boleto encontrado para estes titulos e este documento."
+  if (d?.result?.isError) {
+    const txtErro = (d.result.content || []).map((c: any) => c?.text || "").join(" ").slice(0, 200);
+    throw new Error(`MCP ${tool}: ${txtErro || "a tool respondeu isError sem texto"}`);
+  }
   const conteudo = d?.result?.content;
   const texto = Array.isArray(conteudo) ? conteudo.map((c: any) => c?.text || "").join("") : "";
   if (texto) { try { return JSON.parse(texto); } catch { return { texto }; } }
@@ -447,6 +453,16 @@ export function lotesDeLink(titulos: any[]): { documento: string; titulos: { num
   for (const t of titulos) {
     const doc = String(t.sacado_cnpj || "").replace(/\D/g, "");
     if (!doc || !t.numnota) continue;   // sem CNPJ ou sem nota a tool nao acha nada
+    /* TITULO QUE O ERP NAO PODE EMITIR FICA FORA DO LINK.
+       E a mesma regra que impede a cobranca de gerar 2a via da conta 113 (Grafeno, inteira) e
+       dos primeiros do Safra (112): nesses o boleto foi feito DIRETO NO BANCO, fora do ERP, e
+       um segundo codigo de barras para a mesma divida e o erro que ninguem desfaz.
+       Medido em 07/10, em homologacao: para um titulo da Grafeno o MCP devolveu link com
+       vencimento 09/10 enquanto o espelho do ERP diz 05/10 — ou seja, pode nao ser a mesma
+       cobranca. Enquanto o TI nao confirmar que a pagina so REIMPRIME o que esta registrado,
+       esses titulos seguem pelo caminho antigo: a mensagem diz que o boleto saiu pelo banco e
+       encaminha para o financeiro. */
+    if (t.boleto_geravel === false) continue;
     if (!porDoc.has(doc)) porDoc.set(doc, []);
     porDoc.get(doc)!.push(t);
   }
@@ -490,7 +506,9 @@ Deno.serve(async (req) => {
     const CAP = Math.max(1, Math.min(500, Number(b.limite) || Number(cfg?.cap_grupos_run) || 40));
     const REENVIO = Math.max(0, Number(cfg?.reenvio_min_dias ?? 5));
     // o caminho do link (07/10) so vale com a chave ligada: sem ela, nada muda no motor
-    const LINK_ON = cfg?.boleto_link === true;
+    const LINK_ON = cfg?.boleto_link === true || b.boleto_link === true;
+    // vazio = producao (o guia diz que sem `ambiente` as tools vao para producao)
+    const AMBIENTE = String(b.ambiente || cfg?.boleto_link_ambiente || "").trim();
     const REMETENTE = String(cfg?.remetente || "Nina");
     const ASSINATURA = (cfg?.assinatura && typeof cfg.assinatura === "object") ? cfg.assinatura : {};
     // a marca no corpo; a razao social do rodape e outra coisa, e mora em ASSINATURA
@@ -649,7 +667,11 @@ Deno.serve(async (req) => {
             if (!lotes.length) continue;   // sem CNPJ ou sem nota: segue com anexo
             const links: any[] = [];
             for (const lote of lotes) {
-              const r = await mcpTool(cred, "nitron_boleto_link", { documento: lote.documento, titulos: lote.titulos });
+              // `ambiente: "homologacao"` faz a pagina sair com faixa vermelha "nao pague" —
+              // e como se testa sem mandar cliente pagar boleto de teste.
+              const args: any = { documento: lote.documento, titulos: lote.titulos };
+              if (AMBIENTE) args.ambiente = AMBIENTE;
+              const r = await mcpTool(cred, "nitron_boleto_link", args);
               if (!r?.url) throw new Error("o MCP nao devolveu url: " + JSON.stringify(r).slice(0, 160));
               links.push({ url: String(r.url), expiraEm: r.expiraEm || null, documento: lote.documento,
                 nufins: lote.nufins, boletos: Array.isArray(r.boletos) ? r.boletos.length : null });

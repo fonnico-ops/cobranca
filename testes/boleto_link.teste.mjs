@@ -98,5 +98,24 @@ console.log("7) o e-mail leva botao de link e nenhum anexo");
   ok(/seguem anexos/i.test(corpo), "e a frase do anexo volta");
 }
 
+
+console.log("8) titulo que o ERP nao pode emitir fica FORA do link");
+{
+  // A conta 113 (Grafeno, inteira) e os primeiros do Safra (112) tem boleto feito DIRETO no
+  // banco: pedir 2a via ali cria um segundo codigo de barras para a mesma divida. Medido em
+  // 07/10, em homologacao: para um titulo da Grafeno o MCP devolveu link com vencimento 09/10
+  // enquanto o espelho do ERP diz 05/10 — pode nao ser a mesma cobranca. Entao esses ficam de
+  // fora enquanto o TI nao confirmar que a pagina so reimprime o que esta registrado.
+  const grafeno = { ...t(1, 136659, "1", "12356100005799"), boleto_geravel: false };
+  const normal = t(2, 11626, "1", "12356100005799");
+  ok(lotesDeLink([grafeno]).length === 0, "titulo da Grafeno (boleto_geravel false) nao vira pedido de link");
+  const lotes = lotesDeLink([grafeno, normal]);
+  ok(lotes.length === 1 && lotes[0].titulos.length === 1, "no card misto, so o titulo emitivel entra no link");
+  ok(lotes[0].titulos[0].num_nota === 11626, "e e o emitivel, nao o do banco");
+  ok(!lotes[0].nufins.includes(1), "o nufin do titulo do banco nao e marcado como enviado");
+  ok(lotesDeLink([{ ...normal, boleto_geravel: true }]).length === 1, "boleto_geravel true entra normal");
+  ok(lotesDeLink([{ ...normal, boleto_geravel: null }]).length === 1, "boleto_geravel nulo (nao avaliado) entra: so `false` barra");
+}
+
 console.log(falhas ? `\n${falhas} falha(s)` : "\ntudo certo");
 process.exit(falhas ? 1 : 0);
