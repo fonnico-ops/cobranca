@@ -218,6 +218,37 @@ async function repassar(sb: any, g: EmpGhl, conversa: any, motivo: string, resum
 }
 
 /* ===================================================================== o corpo */
+
+/* ---------------------------------------------------------- o numero que fala com o cliente
+ * Desde 07/10 a cobranca tem DOIS numeros em rodizio (Karla e Bianca). Para uma mensagem de
+ * continuidade — toque de seguimento ou resposta — o numero nao pode ser sorteado: o cliente
+ * esta conversando com UM numero, e trocar no meio da conversa parece outra empresa cobrando a
+ * mesma divida. Entao a ordem e:
+ *   1. o numero que HOJE e dono do contato no CRM (e dele que a mensagem sai de verdade — o
+ *      GHL ignora `fromNumber`, provado em 26/08), se estiver de pe;
+ *   2. qualquer numero do rodizio de pe;
+ *   3. nenhum: a mensagem NAO e escrita. Enfileirar para numero caido foi o que acumulou 145
+ *      mensagens entre 25/09 e 07/10.
+ */
+async function numeroDaVez(sb: any, cfg: any, contactId: string): Promise<{ instancia: string | null; motivo?: string }> {
+  const rodizio: string[] = Array.isArray(cfg?.instancias) && cfg.instancias.length
+    ? cfg.instancias.map(String) : [String(cfg?.instancia || "Nina Financeiro")];
+  const { data: insts } = await sb.from("instancia_ghl")
+    .select("instancia,usuario_ghl_id,ativa,pausada_em").in("instancia", rodizio);
+  const dePe = (insts || []).filter((x: any) => x.ativa === true && !x.pausada_em);
+  if (!dePe.length) return { instancia: null, motivo: `nenhum numero da cobranca esta de pe (${rodizio.join(", ")})` };
+  if (contactId) {
+    const { data: emp } = await sb.from("campanha_dono_emprestado")
+      .select("dono_depois").eq("contact_id", contactId).eq("campanha", "cobranca")
+      .order("criado_em", { ascending: false }).limit(1).maybeSingle();
+    const dono = dePe.find((x: any) => String(x.usuario_ghl_id) === String(emp?.dono_depois || ""));
+    if (dono) return { instancia: String(dono.instancia) };
+  }
+  // ordem do rodizio, para nao concentrar tudo no primeiro
+  const ordenado = rodizio.filter((n) => dePe.some((x: any) => x.instancia === n));
+  return { instancia: ordenado[Math.floor(Math.random() * ordenado.length)] };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
@@ -301,13 +332,23 @@ Deno.serve(async (req) => {
         const r = await ghl(g, "POST", "/conversations/messages", payload, "2021-04-15");
         envio = { canal: "email", ok: r.ok, status: r.status };
       } else {
-        const { data: linha, error: eF } = await sb.from("fila_envio").insert({
-          codparc: c.grupo, contact_id: c.contact_id, canal: "whatsapp",
-          fone: c.destino, nome: c.nome, mensagem: texto,
-          instancia: NOME_INST, campanha: "cobranca_toque" + n, publico: "cliente", empresa: empId,
-          imagens: anexos.length ? anexos : null, status: "pendente",
-        }).select("id").maybeSingle();
-        envio = { canal: "whatsapp", ok: !eF, fila_id: linha?.id ?? null, erro: eF?.message };
+        const vez = await numeroDaVez(sb, cfg, String(c.contact_id || ""));
+        if (!vez.instancia) {
+          // sem numero de pe o toque NAO e escrito: ele volta na proxima passada, e o
+          // `proximo_toque_em` nao avanca (o toque que nao saiu nao conta, logo abaixo).
+          envio = { canal: "whatsapp", ok: false, erro: vez.motivo };
+        } else {
+          const { data: linha, error: eF } = await sb.from("fila_envio").insert({
+            codparc: c.grupo, contact_id: c.contact_id, canal: "whatsapp",
+            fone: c.destino, nome: c.nome, mensagem: texto,
+            instancia: vez.instancia, campanha: "cobranca_toque" + n, publico: "cliente", empresa: empId,
+            // 'segurado': quem solta e o cobranca-liberar, uma por numero a cada 2 minutos. O
+            // toque entra no MESMO ritmo da cobranca — senao 30 toques sairiam de uma vez e
+            // gastariam em minutos o orcamento que protege o numero.
+            imagens: anexos.length ? anexos : null, status: "segurado",
+          }).select("id").maybeSingle();
+          envio = { canal: "whatsapp", ok: !eF, fila_id: linha?.id ?? null, erro: eF?.message, instancia: vez.instancia };
+        }
       }
 
       // Toque que nao saiu NAO conta: senao uma instancia caida por dois dias consome o

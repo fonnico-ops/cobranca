@@ -98,10 +98,19 @@ Deno.serve(async (req) => {
         .eq("instancia", inst).order("liberado_em", { ascending: false }).limit(1).maybeSingle();
       if (!podeSoltar(ult?.liberado_em || null, intervalo)) { semVez.push(inst); continue; }
 
-      // a mais antiga primeiro: cobranca aprovada ha mais tempo e a que mais espera
-      const { data: linha } = await sb.from("fila_envio").select("id")
-        .eq("status", "segurado").eq("instancia", inst).like("campanha", "cobranca%")
-        .order("id", { ascending: true }).limit(1).maybeSingle();
+      /* RESPOSTA PASSA NA FRENTE DE COBRANCA.
+         Quem escreveu esta esperando resposta; quem esta sendo cobrado nao esta esperando
+         nada. Numa fila por ordem de chegada, uma resposta atras de 60 cobrancas sairia duas
+         horas depois — e duas horas depois ela ja nao responde a pergunta que foi feita.
+         Dentro de cada grupo, a mais antiga primeiro. */
+      let linha: any = null;
+      for (const filtro of ["cobranca_resposta", null] as (string | null)[]) {
+        let q = sb.from("fila_envio").select("id")
+          .eq("status", "segurado").eq("instancia", inst);
+        q = filtro ? q.eq("campanha", filtro) : q.like("campanha", "cobranca%");
+        const { data } = await q.order("id", { ascending: true }).limit(1).maybeSingle();
+        if (data?.id) { linha = data; break; }
+      }
       if (!linha?.id) { semFila.push(inst); continue; }
 
       if (seco) { liberadas.push({ instancia: inst, fila_id: linha.id, seco: true }); continue; }
