@@ -252,6 +252,8 @@ function pagina(cards: any[], ctx: any): string {
         <div class="vlr">${brl(c.valor)}</div>
       </header>
       <div class="anex">
+        ${(Array.isArray(c.boleto_links) ? c.boleto_links : []).map((l: any, i: number) =>
+          `<a href="${esc(l.url)}" target="_blank" rel="noopener">abrir os boletos${(c.boleto_links || []).length > 1 ? " (" + (i + 1) + ")" : ""}</a>`).join("")}
         ${boletos.length ? `<span class="ok">${boletos.length} boleto${boletos.length > 1 ? "s" : ""} anexo${boletos.length > 1 ? "s" : ""}</span>` : ""}
         ${c.sem_boleto ? `<span class="falta">${c.sem_boleto} título${c.sem_boleto > 1 ? "s" : ""} sem boleto no ERP</span>` : ""}
         ${boletos.slice(0, 6).map((b: any) => `<a href="${esc(b.url)}" target="_blank" rel="noopener">PDF ${esc(String(b.dtvenc).slice(8, 10) + "/" + String(b.dtvenc).slice(5, 7))}</a>`).join("")}

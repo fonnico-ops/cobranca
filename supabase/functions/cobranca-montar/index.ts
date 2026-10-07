@@ -1,4 +1,4 @@
-// cobranca-montar (v10) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v11) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -57,6 +57,9 @@ const detalhar = (e: any) => [e?.message, e?.details, e?.hint, e?.code].filter(B
 
 const brl = (v: any) => "R$ " + Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const dataBr = (iso: any) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || "")); return m ? `${m[3]}/${m[2]}` : String(iso || ""); };
+// com ANO: vale para validade de link, que pode cair no ano seguinte. "vale ate 22/12" num
+// e-mail lido em janeiro e ambiguo, e a ambiguidade cai justo em cima de quem vai pagar.
+const dataBrAno = (iso: any) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || "")); return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso || ""); };
 /**
  * O primeiro nome de uma PESSOA — ou nada.
  *
@@ -230,7 +233,22 @@ function sobreOsBoletos(ctx: any): string[] {
     : (Number(ctx.semGeravel) || 0);
   const out: string[] = [];
 
-  if (comBoleto) {
+  /* COM LINK, NAO COM ANEXO (decisao do gestor em 07/10).
+     O link e uma pagina que consulta o ERP na hora em que o cliente abre: boleto pago aparece
+     como pago, vencido aparece como vencido com o PDF ainda disponivel, e o PDF e REIMPRESSAO
+     do mesmo boleto — abrir o link nao gera codigo de barras novo, que e a trava que o
+     Grafeno e o Safra exigem. E resolve o problema do anexo: PDF e a primeira coisa que filtro
+     de spam corporativo remove, e o cliente ficava com um e-mail falando de um boleto que nao
+     estava la. Uma mensagem, um link, mesmo com 10 boletos. */
+  const links: any[] = Array.isArray(ctx.links) ? ctx.links : [];
+  if (links.length) {
+    out.push(comBoleto === 1
+      ? "O boleto está neste link:"
+      : `${links.length > 1 ? "Os boletos estão nestes links:" : "Os boletos estão neste link:"}`);
+    for (const l of links) out.push(String(l.url));
+    out.push("Por ele você baixa o PDF, copia o código de barras ou o Pix."
+      + (links[0]?.expiraEm ? ` Válido até ${dataBrAno(String(links[0].expiraEm).slice(0, 10))}.` : ""));
+  } else if (comBoleto) {
     out.push(semBoleto
       ? (comBoleto === 1 ? "Segue em anexo o boleto que tenho aqui." : `Seguem em anexo os ${comBoleto} boletos que tenho aqui.`)
       : (comBoleto === 1 ? "Segue o boleto em anexo para pagamento." : "Seguem os boletos em anexo para pagamento."));
@@ -315,8 +333,8 @@ function textoAVencer(ctx: any): string {
   return partes.join("\n");
 }
 
-/** O e-mail leva o mesmo conteudo, com o link do boleto alem do anexo. */
-function html(texto: string, boletos: any[]): string {
+/** O e-mail leva o mesmo conteudo. Com link, um botao por link; sem link, um botao por PDF. */
+function html(texto: string, boletos: any[], links: any[] = []): string {
   // o rodape da assinatura vai em corpo menor e cinza, separado por um filete \u2014 no e-mail
   // ele e identificacao, nao mensagem, e com o mesmo peso do texto competiria com a cobranca
   const [acima, abaixo] = (() => {
@@ -335,16 +353,122 @@ function html(texto: string, boletos: any[]): string {
   // O link vai ALEM do anexo, nao no lugar dele. Anexo de PDF e a primeira coisa que filtro
   // de spam corporativo remove, e o cliente ficaria com um e-mail falando de um boleto que
   // nao esta la. Com o link, a cobranca continua de pe mesmo se o anexo nao passar.
-  const links = boletos.length
+  const botao = (href: string, rotulo: string) =>
+    `<a href="${href}" style="display:inline-block;margin:4px 8px 4px 0;padding:10px 16px;background:#0b5;color:#fff;text-decoration:none;border-radius:6px;font:600 13px system-ui,sans-serif">${rotulo}</a>`;
+  // COM LINK (caminho de 07/10): um botao, que abre a pagina com todos os boletos. A pagina
+  // consulta o ERP na hora, entao ela mostra pago/vencido sem a gente reenviar nada — e nao
+  // ha anexo para filtro de spam remover.
+  const blocoLinks = links.length
+    ? '<p style="margin:18px 0 0">' + links.map((l: any, i: number) =>
+        botao(String(l.url), links.length > 1 ? `Abrir os boletos (${i + 1} de ${links.length})` : "Abrir os boletos")
+      ).join("")
+      + '</p><p style="margin:8px 0 0;font:12px system-ui,sans-serif;color:#666">No link você baixa o PDF, copia o código de barras ou o Pix'
+      + (links[0]?.expiraEm ? ` — válido até ${dataBrAno(String(links[0].expiraEm).slice(0, 10))}` : "") + '.</p>'
+    : "";
+  const blocoPdf = boletos.length
     ? '<p style="margin:18px 0 0">' + boletos.map((b: any) =>
-        `<a href="${b.url}" style="display:inline-block;margin:4px 8px 4px 0;padding:8px 14px;background:#0b5;color:#fff;text-decoration:none;border-radius:6px;font:600 13px system-ui,sans-serif">Boleto venc. ${dataBr(b.dtvenc)} — ${brl(b.valor)}</a>`
+        botao(String(b.url), `Boleto venc. ${dataBr(b.dtvenc)} — ${brl(b.valor)}`)
       ).join("") + '</p><p style="margin:8px 0 0;font:12px system-ui,sans-serif;color:#666">Os boletos também seguem anexos a este e-mail.</p>'
     : "";
+  const links_ = blocoLinks || blocoPdf;
   // o marcador vira os botoes; se nao houver boleto, some sem deixar linha vazia
   const miolo = corpo.includes(MARCA_BOLETOS)
-    ? corpo.replace(MARCA_BOLETOS + "<br>", links).replace(MARCA_BOLETOS, links)
-    : corpo + links;
+    ? corpo.replace(MARCA_BOLETOS + "<br>", links_).replace(MARCA_BOLETOS, links_)
+    : corpo + links_;
   return `<div style="font:15px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;color:#111;max-width:620px">${miolo}${rodapeHtml}</div>`;
+}
+
+
+/* ============================================================ O LINK DOS BOLETOS (MCP Nitron)
+ *
+ * Decisao do gestor em 07/10: parar de gerar e anexar o PDF e mandar o LINK que o MCP da
+ * Nitron devolve. A tool `nitron_boleto_link` recebe o CNPJ do sacado e a lista de
+ * {num_nota, parcela} e devolve uma pagina com todos os boletos daquele cliente — PDF de
+ * reimpressao, codigo de barras e Pix, consultando o ERP a cada abertura.
+ *
+ * TRES REGRAS DO GUIA QUE O CODIGO TEM DE RESPEITAR, e por que cada uma existe:
+ *   - UM DOCUMENTO POR LINK. A tool casa o CNPJ com as notas; mandar notas de outra loja no
+ *     mesmo link devolve "Nenhum boleto encontrado". Um grupo da cobranca reune lojas da mesma
+ *     matriz (CNPJs diferentes), entao os titulos sao separados por `sacado_cnpj` e cada CNPJ
+ *     ganha o seu link.
+ *   - NO MAXIMO 20 TITULOS POR LINK. Acima disso, mais de um link no mesmo texto.
+ *   - 120 CHAMADAS POR MINUTO, dividido com as outras automacoes que usam a mesma chave. Uma
+ *     rodada de 60 grupos cabe, mas com folga: 1 segundo entre grupos, e 429 e respeitado com
+ *     o `Retry-After` que o MCP devolve.
+ *
+ * SEM CHAVE, NADA MUDA. `cobranca_config.boleto_link` liga o caminho novo; com ele desligado
+ * (ou sem a chave nas Edge Functions) o motor segue anexando PDF como antes. Falha de link
+ * NAO cancela a cobranca do grupo: o card volta para o anexo e o motivo fica gravado.
+ */
+const MCP_URL = "https://mcp-y7bu.onrender.com/mcp";
+
+async function chaveMcp(sb: any): Promise<{ chave: string; header: string; prefixo: string }> {
+  const header = Deno.env.get("NITRON_MCP_HEADER") || "Authorization";
+  const prefixo = Deno.env.get("NITRON_MCP_PREFIXO") ?? (header === "Authorization" ? "Bearer " : "");
+  const doEnv = Deno.env.get("NITRON_MCP_KEY");
+  if (doEnv) return { chave: doEnv, header, prefixo };
+  const { data } = await sb.from("motor_config").select("valor").eq("chave", "NITRON_MCP_KEY").maybeSingle();
+  return { chave: String(data?.valor || ""), header, prefixo };
+}
+
+/** Uma chamada de tool do MCP, em JSON-RPC. Devolve o objeto que a tool respondeu. */
+async function mcpTool(cred: { chave: string; header: string; prefixo: string }, tool: string, args: any): Promise<any> {
+  const r = await fetch(MCP_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      // o MCP responde em JSON ou em SSE dependendo do cliente; aceitar os dois evita 406
+      "Accept": "application/json, text/event-stream",
+      [cred.header]: cred.prefixo + cred.chave,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: tool, arguments: args } }),
+  });
+  if (r.status === 429) {
+    const espera = Math.min(30, Number(r.headers.get("Retry-After") || 5));
+    await new Promise((res) => setTimeout(res, espera * 1000));
+    return await mcpTool(cred, tool, args);
+  }
+  const txt = await r.text();
+  if (!r.ok) throw new Error(`MCP ${tool} ${r.status}: ${txt.slice(0, 200)}`);
+  // resposta em SSE vem como linhas "data: {...}"; em JSON vem direto
+  const cru = txt.startsWith("data:") ? txt.split(/\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("") : txt;
+  let d: any = {};
+  try { d = JSON.parse(cru); } catch { throw new Error(`MCP ${tool}: resposta ilegivel: ${txt.slice(0, 200)}`); }
+  if (d.error) throw new Error(`MCP ${tool}: ${d.error.message || JSON.stringify(d.error).slice(0, 200)}`);
+  const conteudo = d?.result?.content;
+  const texto = Array.isArray(conteudo) ? conteudo.map((c: any) => c?.text || "").join("") : "";
+  if (texto) { try { return JSON.parse(texto); } catch { return { texto }; } }
+  return d?.result?.structuredContent ?? d?.result ?? {};
+}
+
+/** Os links de um card: um por CNPJ, no maximo 20 titulos cada. */
+export function lotesDeLink(titulos: any[]): { documento: string; titulos: { num_nota: number; parcela: string }[]; nufins: number[] }[] {
+  const porDoc = new Map<string, any[]>();
+  for (const t of titulos) {
+    const doc = String(t.sacado_cnpj || "").replace(/\D/g, "");
+    if (!doc || !t.numnota) continue;   // sem CNPJ ou sem nota a tool nao acha nada
+    if (!porDoc.has(doc)) porDoc.set(doc, []);
+    porDoc.get(doc)!.push(t);
+  }
+  const lotes: any[] = [];
+  for (const [documento, lista] of porDoc) {
+    // sem repetir o par nota+parcela: o guia pede a lista sem duplicata, e duas linhas da
+    // mesma nota (a nota e o pedido da empresa 4) sao DOIS boletos que o link ja mostra juntos
+    const vistos = new Set<string>();
+    const unicos: { num_nota: number; parcela: string }[] = [];
+    const nufins: number[] = [];
+    for (const t of lista) {
+      nufins.push(Number(t.nufin));
+      const par = `${t.numnota}|${String(t.parcela ?? "1")}`;
+      if (vistos.has(par)) continue;
+      vistos.add(par);
+      unicos.push({ num_nota: Number(t.numnota), parcela: String(t.parcela ?? "1") });
+    }
+    for (let i = 0; i < unicos.length; i += 20) {
+      lotes.push({ documento, titulos: unicos.slice(i, i + 20), nufins: i === 0 ? nufins : [] });
+    }
+  }
+  return lotes;
 }
 
 /* ----------------------------------------------------------------------- main */
@@ -365,6 +489,8 @@ Deno.serve(async (req) => {
     const ATRASO_MAX = Number(cfg?.atraso_max ?? 180);
     const CAP = Math.max(1, Math.min(500, Number(b.limite) || Number(cfg?.cap_grupos_run) || 40));
     const REENVIO = Math.max(0, Number(cfg?.reenvio_min_dias ?? 5));
+    // o caminho do link (07/10) so vale com a chave ligada: sem ela, nada muda no motor
+    const LINK_ON = cfg?.boleto_link === true;
     const REMETENTE = String(cfg?.remetente || "Nina");
     const ASSINATURA = (cfg?.assinatura && typeof cfg.assinatura === "object") ? cfg.assinatura : {};
     // a marca no corpo; a razao social do rodape e outra coisa, e mora em ASSINATURA
@@ -485,6 +611,10 @@ Deno.serve(async (req) => {
         : boletos;
 
       cards.push({
+        // `_base` nao e coluna: ele some antes do upsert. Existe porque o texto do card pode
+        // ser reescrito DEPOIS do corte do teto, quando o link dos boletos chega do MCP —
+        // pedir link para os 139 grupos elegiveis gastaria 139 chamadas para usar 60.
+        _base: base, _teto: { wpp: TETO_WPP, email: TETO_EMAIL },
         rodada, fase, grupo: Number(g), nome: nomes[String(ancora)] || null,
         codparcs, nufins: ordenados.map((t) => t.nufin),
         n_titulos: ordenados.length, valor: Math.round(total * 100) / 100, maior_atraso: maiorAtraso,
@@ -499,6 +629,51 @@ Deno.serve(async (req) => {
     // maior divida primeiro: se o teto cortar, corta o que menos importa
     cards.sort((a, b) => b.valor - a.valor);
     const escolhidos = cards.slice(0, CAP);
+
+    /* ---- O LINK DOS BOLETOS, so para os escolhidos --------------------------------------
+       Decisao do gestor em 07/10: a mensagem leva link, nao anexo. O link vem do MCP da
+       Nitron e e pedido AQUI, depois do corte: pedir para os 139 elegiveis gastaria 139 das
+       120 chamadas por minuto da chave para usar 60.
+       Falha de link nao cancela a cobranca do grupo — o card volta para o anexo, com o texto
+       que o anexo pede, e o motivo entra na resposta. Perder a cobranca do dia porque um
+       servico de link nao respondeu seria desproporcional. */
+    const linkErros: any[] = [];
+    if (LINK_ON && escolhidos.length) {
+      const cred = await chaveMcp(sb);
+      if (!cred.chave) {
+        linkErros.push({ erro: "sem NITRON_MCP_KEY nas Edge Functions nem em motor_config — os cards seguiram com anexo" });
+      } else {
+        for (const c of escolhidos) {
+          try {
+            const lotes = lotesDeLink(c._base.titulos);
+            if (!lotes.length) continue;   // sem CNPJ ou sem nota: segue com anexo
+            const links: any[] = [];
+            for (const lote of lotes) {
+              const r = await mcpTool(cred, "nitron_boleto_link", { documento: lote.documento, titulos: lote.titulos });
+              if (!r?.url) throw new Error("o MCP nao devolveu url: " + JSON.stringify(r).slice(0, 160));
+              links.push({ url: String(r.url), expiraEm: r.expiraEm || null, documento: lote.documento,
+                nufins: lote.nufins, boletos: Array.isArray(r.boletos) ? r.boletos.length : null });
+            }
+            if (!links.length) continue;
+            const comLink = { ...c._base, links };
+            c.mensagem = (fase === "vencido" ? textoVencido({ ...comLink, teto: TETO_WPP }) : textoAVencer({ ...comLink, teto: TETO_WPP }))
+              .replace("\n" + MARCA_BOLETOS, "").replace(MARCA_RODAPE, "");
+            c.corpo_email = html(fase === "vencido" ? textoVencido({ ...comLink, teto: TETO_EMAIL }) : textoAVencer({ ...comLink, teto: TETO_EMAIL }), [], links);
+            c.boleto_links = links;
+            // em modo link NAO vai anexo: e o que o gestor pediu, e e o que impede o e-mail de
+            // levar PDF e link dizendo a mesma coisa duas vezes.
+            c.boletos = [];
+            // 1 segundo entre clientes: a chave tem 120 chamadas por minuto, dividida com as
+            // outras automacoes da casa.
+            await new Promise((r) => setTimeout(r, 1000));
+          } catch (e) {
+            linkErros.push({ grupo: c.grupo, nome: c.nome, erro: String(e).slice(0, 200) });
+          }
+        }
+      }
+    }
+    // `_base`/`_teto` nao sao colunas: o PostgREST recusa a linha inteira se eles forem
+    for (const c of cards) { delete c._base; delete c._teto; }
 
     if (seco) {
       return j({
@@ -557,6 +732,9 @@ Deno.serve(async (req) => {
       grupos_elegiveis: cards.length, teto: CAP,
       valor: Math.round(gravar.reduce((a, c) => a + c.valor, 0)),
       com_boleto: gravar.filter((c) => c.boletos.length).length,
+      com_link: gravar.filter((c) => Array.isArray(c.boleto_links) && c.boleto_links.length).length,
+      link_ligado: LINK_ON,
+      link_falhou: linkErros.length ? linkErros : undefined,
       sem_boleto_algum: gravar.filter((c) => c.sem_boleto > 0).length,
       com_boleto_so_no_banco: gravar.filter((c) => c.sem_boleto_no_banco > 0).length,
       sem_contato: gravar.filter((c) => c.status === "sem_contato").length,
