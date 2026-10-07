@@ -352,7 +352,7 @@ async function manda(acao){
     const d=await r.json();
     if(!d.ok) throw new Error(d.erro||"falhou");
     aviso(acao==="aprovar"
-      ? ("Pronto: "+(d.enfileirados||0)+" grupo(s) \\u2014 "+(d.whatsapp_na_fila||0)+" WhatsApp na fila, "+(d.email_enviado||0)+" e-mail enviado"+(d.erros?", "+d.erros+" com erro":"")+(d.segurados_ate_o_whatsapp_voltar?", "+d.segurados_ate_o_whatsapp_voltar+" esperando o WhatsApp voltar":"")+". Recarregando\\u2026")
+      ? ("Pronto: "+(d.enfileirados||0)+" grupo(s) \\u2014 "+(d.whatsapp_retidas!=null?d.whatsapp_retidas:(d.whatsapp_na_fila||0))+" WhatsApp retidos (saem 1 por n\\u00famero a cada 2 min), "+(d.email_enviado||0)+" e-mail enviado"+(d.erros?", "+d.erros+" com erro":"")+(d.numeros_recusados_antes_de_enviar?", "+d.numeros_recusados_antes_de_enviar+" n\\u00famero(s) recusado(s) na confer\\u00eancia":"")+(d.segurados_ate_o_whatsapp_voltar?", "+d.segurados_ate_o_whatsapp_voltar+" esperando o WhatsApp voltar":"")+". Recarregando\\u2026")
       : ((d.recusados||0)+" recusado(s). Recarregando\\u2026"));
     setTimeout(()=>location.reload(),2200);
   }catch(e){aviso("Erro: "+e.message,true);$("#aprovar").disabled=false;$("#recusar").disabled=false;}
