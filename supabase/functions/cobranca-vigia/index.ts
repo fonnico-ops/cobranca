@@ -1,4 +1,4 @@
-// cobranca-vigia (v3) — olha o numero de WhatsApp da cobranca e AVISA uma pessoa quando ele cai.
+// cobranca-vigia (v4) — olha OS numeros de WhatsApp da cobranca e AVISA uma pessoa quando um cai.
 //
 // POR QUE EXISTE. Em 24/09 as 18:24 o ZaptosWPP escreveu, dentro da propria conversa, que a
 // "Nina Financeiro" estava desconectada. O trilho compartilhado fez a parte dele: pausou a
@@ -7,20 +7,29 @@
 // sistema se protegeu sozinho, e ninguem ficou sabendo. O numero passou 14 horas fora do ar e
 // a cobranca do dia simplesmente nao aconteceu — sem erro na tela, sem aviso, sem nada.
 //
-// Um robo que para sozinho e bom. Um robo que para sozinho e nao conta para ninguem vira um
-// dia perdido por semana. Esta funcao e so isso: contar.
+// E ACONTECEU DE NOVO, PIOR: o mesmo numero caiu em 25/09 as 10:56 e ficou 12 DIAS fora. O
+// aviso chegou a ser escrito, mas ficou preso na propria fila (o trilho foi desligado em
+// 06/10), e 145 mensagens de cobranca envelheceram esperando — 17 delas RESPOSTAS a clientes
+// que tinham escrito. Dai duas mudancas nesta versao e no resto do motor: o aviso tambem sai
+// por e-mail (que nao depende de instancia nenhuma) e a cobranca passou a ter DOIS numeros.
 //
-// O QUE ELA FAZ, a cada 10 minutos:
-//   1. le o estado da instancia da cobranca em instancia_ghl (pausada_em)
+// v4: UM VIGIA POR NUMERO. Desde 07/10 a cobranca alterna entre os numeros da Karla e da
+//     Bianca (`cobranca_config.instancias`). Vigiar so um deixaria o outro cair em silencio —
+//     que e exatamente o defeito que esta funcao existe para nao ter. Agora cada numero tem
+//     estado proprio em `vigia_estado.numeros`, e o aviso diz o que muda na pratica:
+//     com um numero de pe a cobranca CONTINUA, no dobro do tempo; com nenhum, ela para.
+//
+// O QUE ELA FAZ, a cada 10 minutos, para cada numero do rodizio:
+//   1. le o estado em instancia_ghl (pausada_em)
 //   2. compara com o que viu da ultima vez (cobranca_config.vigia_estado)
 //   3. CAIU   -> manda WhatsApp para o numero de alerta, por OUTRA instancia (a que caiu nao
-//                manda nada — seria pedir para o aparelho quebrado avisar que quebrou)
-//      VOLTOU -> avisa que voltou e quantas mensagens foram liberadas
-//      CONTINUA CAIDA -> lembra a cada N horas, so em horario comercial, para nao sumir do radar
+//                manda nada — seria pedir para o aparelho quebrado avisar que quebrou) e e-mail
+//      VOLTOU -> avisa que voltou e quantas mensagens estao retidas
+//      CONTINUA CAIDA -> lembra a cada N horas, so em horario comercial
 //
-// GET/POST ?liberar=1&k=<painel_chave>  tira a pausa depois que o numero voltou no Zaptos, e
-//   responde quantas mensagens estao liberadas. O link vai dentro do proprio aviso: quem
-//   reconectou o numero e quem sabe que ele voltou, e isso tem de ser um clique, nao um chamado.
+// GET/POST ?liberar=1&k=<painel_chave>[&instancia=Karla]  tira a pausa depois que o numero
+//   voltou no Zaptos. Sem `instancia`, libera todos os pausados do rodizio. O link vai dentro
+//   do proprio aviso: quem reconectou e quem sabe que voltou, e isso tem de ser um clique.
 //
 // O QUE ELA NAO FAZ. Ela nao tira a pausa sozinha. Nao da para saber daqui se o aparelho
 // voltou — o que temos e a ausencia de erro, que nao e a mesma coisa. Tirar a pausa no
@@ -49,6 +58,13 @@ export function podeLembrar(hora: number, ultimoEm: any, esperaHoras: number, ag
   return agora - new Date(ultimoEm).getTime() >= esperaHoras * 3600000;
 }
 
+/** O que a queda DESTE numero significa para a cobranca, dado quantos sobraram de pe. */
+export function consequencia(dePe: number, total: number): string {
+  if (dePe === 0) return "A cobrança PAROU de enviar por WhatsApp — nenhum número de pé. O e-mail continua saindo.";
+  if (total <= 1) return "A cobrança PAROU de enviar por WhatsApp. O e-mail continua saindo.";
+  return `A cobrança CONTINUA pelo${dePe > 1 ? "s" : ""} ${dePe} número${dePe > 1 ? "s" : ""} que sobrou${dePe > 1 ? "ram" : ""}, no dobro do tempo por rodada.`;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
@@ -56,78 +72,107 @@ Deno.serve(async (req) => {
     const u = new URL(req.url);
 
     const { data: cfg } = await sb.from("cobranca_config")
-      .select("instancia,alerta_fone,alerta_email,alerta_instancia,alerta_lembrete_horas,vigia_estado,painel_chave")
+      .select("instancia,instancias,alerta_fone,alerta_email,alerta_instancia,alerta_lembrete_horas,vigia_estado,painel_chave")
       .eq("id", 1).maybeSingle();
-    const NOME_INST = String(cfg?.instancia || "Nina Financeiro");
+    const RODIZIO: string[] = Array.isArray(cfg?.instancias) && cfg.instancias.length
+      ? cfg.instancias.map(String) : [String(cfg?.instancia || "Nina Financeiro")];
     const FONE = String(cfg?.alerta_fone || "").replace(/\D/g, "");
     const MAIL = String(cfg?.alerta_email || "").trim();
     const ESPERA = Math.max(1, Number(cfg?.alerta_lembrete_horas ?? 3));
-    const estadoAnterior = (cfg?.vigia_estado || {}) as any;
+    const anterior = ((cfg?.vigia_estado || {}) as any).numeros || {};
 
-    const { data: inst } = await sb.from("instancia_ghl")
-      .select("instancia,pausada_em,pausada_motivo,ativa").eq("instancia", NOME_INST).maybeSingle();
-    if (!inst) return j({ ok: false, erro: `instancia "${NOME_INST}" nao esta em instancia_ghl` }, 404);
+    const { data: insts } = await sb.from("instancia_ghl")
+      .select("instancia,pausada_em,pausada_motivo,ativa").in("instancia", RODIZIO);
+    const cadastro: Record<string, any> = {};
+    for (const r of (insts || [])) cadastro[String(r.instancia)] = r;
+    const faltando = RODIZIO.filter((n) => !cadastro[n]);
+    if (faltando.length === RODIZIO.length) {
+      return j({ ok: false, erro: `nenhum numero do rodizio esta em instancia_ghl: ${RODIZIO.join(", ")}` }, 404);
+    }
 
-    /* quantas mensagens da cobranca estao presas esperando o numero voltar */
-    const { count: presas } = await sb.from("fila_envio").select("id", { count: "exact", head: true })
-      .eq("instancia", NOME_INST).eq("status", "pendente");
-    const seguradas = Number(presas || 0);
+    /* quantas mensagens da cobranca estao RETIDAS por numero. 'segurado' e o estado novo (o
+       ritmo proprio da cobranca); 'pendente' entra tambem porque linha solta e ainda nao
+       enviada tambem espera o numero. */
+    const retidasDe = async (inst: string) => {
+      const { count } = await sb.from("fila_envio").select("id", { count: "exact", head: true })
+        .eq("instancia", inst).in("status", ["segurado", "pendente"]).like("campanha", "cobranca%");
+      return Number(count || 0);
+    };
+
+    const linkLiberar = (inst: string) =>
+      `${Deno.env.get("SUPABASE_URL")}/functions/v1/cobranca-vigia?liberar=1&instancia=${encodeURIComponent(inst)}&k=${encodeURIComponent(String(cfg?.painel_chave || ""))}`;
 
     /* ---------------- liberar: so com a chave do painel, e so quando alguem reconectou ------ */
     if (u.searchParams.get("liberar") === "1") {
       const chave = String(cfg?.painel_chave || "");
       if (chave && u.searchParams.get("k") !== chave) return j({ ok: false, erro: "chave errada" }, 401);
-      if (!inst.pausada_em) return j({ ok: true, ja_estava_livre: true, instancia: NOME_INST, seguradas });
-      const { error } = await sb.from("instancia_ghl")
-        .update({ pausada_em: null, pausada_motivo: null }).eq("instancia", NOME_INST);
-      if (error) throw error;
-      const solto = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca: ${NOME_INST} liberada`,
-        `✅ ${NOME_INST} liberada.\n\n${seguradas} mensagem(ns) da cobrança volta(m) a sair agora, no ritmo normal (cerca de 2 por minuto, não de uma vez).`);
-      await sb.from("cobranca_config").update({
-        vigia_estado: { estado: "ok", desde: new Date().toISOString(), ultimo_aviso_em: new Date().toISOString() },
-      }).eq("id", 1);
-      return j({ ok: true, liberada: NOME_INST, liberadas: seguradas, avisado: solto.ok, aviso_falhou: solto.motivo || null });
+      const pedida = u.searchParams.get("instancia");
+      const alvos = (pedida ? [pedida] : RODIZIO).filter((n) => cadastro[n]?.pausada_em);
+      if (!alvos.length) return j({ ok: true, ja_estava_livre: true, rodizio: RODIZIO });
+      const soltas: any[] = [];
+      for (const inst of alvos) {
+        const retidas = await retidasDe(inst);
+        const { error } = await sb.from("instancia_ghl")
+          .update({ pausada_em: null, pausada_motivo: null }).eq("instancia", inst);
+        if (error) throw error;
+        const aviso = await avisar(sb, cfg, inst, FONE, MAIL, `Cobranca: ${inst} liberada`,
+          `✅ ${inst} liberada.\n\n${retidas} mensagem(ns) da cobrança volta(m) a sair agora, no ritmo do rodízio (uma a cada 2 minutos por número, não de uma vez).`);
+        soltas.push({ instancia: inst, retidas, avisado: aviso.ok, aviso_falhou: aviso.motivo || null });
+        anterior[inst] = { estado: "ok", desde: new Date().toISOString(), ultimo_aviso_em: new Date().toISOString() };
+      }
+      await sb.from("cobranca_config").update({ vigia_estado: { numeros: anterior } }).eq("id", 1);
+      return j({ ok: true, liberadas: soltas });
     }
 
-    /* ---------------- vigia ---------------------------------------------------------------- */
+    /* ---------------- vigia, numero por numero ------------------------------------------- */
     const agora = new Date().toISOString();
-    const estado = inst.pausada_em ? "caida" : "ok";
-    // "mudou" tambem vale quando o estado e o mesmo mas o aviso daquela mudanca nunca saiu:
-    // sem isso, uma falha no primeiro aviso deixaria a queda inteira sem nenhum alerta.
-    const mudou = estadoAnterior.estado !== estado || (estado === "caida" && !estadoAnterior.ultimo_aviso_em);
-    const linkLiberar = `${Deno.env.get("SUPABASE_URL")}/functions/v1/cobranca-vigia?liberar=1&k=${encodeURIComponent(String(cfg?.painel_chave || ""))}`;
+    const dePe = RODIZIO.filter((n) => cadastro[n]?.ativa === true && !cadastro[n]?.pausada_em).length;
+    const saida: any[] = [];
 
-    let aviso: { ok: boolean; motivo?: string } = { ok: false };
-    if (mudou && estado === "caida") {
-      aviso = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca PARADA: o WhatsApp ${NOME_INST} caiu`,
-        `⚠️ O WhatsApp da cobrança (${NOME_INST}) caiu às ${qdo(inst.pausada_em)}.\n\n` +
-        `A cobrança PAROU de enviar sozinha — nada fica se acumulando às cegas.\n` +
-        `${seguradas} mensagem(ns) estão seguradas.\n\n` +
-        `Motivo registrado: ${inst.pausada_motivo || "queda detectada no envio"}\n\n` +
-        `Quando reconectar o número na Zaptos, abra este link para liberar:\n${linkLiberar}`);
-    } else if (mudou && estado === "ok") {
-      aviso = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca: ${NOME_INST} voltou`,
-        `✅ ${NOME_INST} voltou. ${seguradas} mensagem(ns) da cobrança volta(m) a sair no ritmo normal.`);
-    } else if (estado === "caida" && podeLembrar(horaSp(), estadoAnterior.ultimo_aviso_em, ESPERA)) {
-      aviso = await avisar(sb, cfg, NOME_INST, FONE, MAIL, `Cobranca ainda parada: ${NOME_INST} fora do ar`,
-        `⏳ O WhatsApp da cobrança (${NOME_INST}) continua fora do ar há ${ha(inst.pausada_em)}.\n\n` +
-        `${seguradas} mensagem(ns) seguradas, e a cobrança do dia não está saindo.\n\n` +
-        `Reconectou? libere aqui:\n${linkLiberar}`);
-    }
+    for (const inst of RODIZIO) {
+      const row = cadastro[inst];
+      if (!row) { saida.push({ instancia: inst, erro: "nao esta em instancia_ghl" }); continue; }
+      const estado = row.pausada_em ? "caida" : "ok";
+      const ant = anterior[inst] || {};
+      // "mudou" tambem vale quando o estado e o mesmo mas o aviso daquela mudanca nunca saiu:
+      // sem isso, uma falha no primeiro aviso deixaria a queda inteira sem nenhum alerta.
+      const mudou = ant.estado !== estado || (estado === "caida" && !ant.ultimo_aviso_em);
+      const retidas = await retidasDe(inst);
+      let aviso: any = { ok: false };
 
-    await sb.from("cobranca_config").update({
-      vigia_estado: {
+      if (mudou && estado === "caida") {
+        aviso = await avisar(sb, cfg, inst, FONE, MAIL, `Cobranca: o numero ${inst} caiu`,
+          `⚠️ O WhatsApp da cobrança no número da ${inst} caiu às ${qdo(row.pausada_em)}.\n\n` +
+          `${consequencia(dePe, RODIZIO.length)}\n` +
+          `${retidas} mensagem(ns) deste número estão retidas — nada se acumula às cegas e nada sai de uma vez na volta.\n\n` +
+          `Motivo registrado: ${row.pausada_motivo || "queda detectada no envio"}\n\n` +
+          `Quando reconectar na Zaptos, abra este link para liberar:\n${linkLiberar(inst)}`);
+      } else if (mudou && estado === "ok") {
+        aviso = await avisar(sb, cfg, inst, FONE, MAIL, `Cobranca: ${inst} voltou`,
+          `✅ O número da ${inst} voltou. ${retidas} mensagem(ns) retida(s) sai(em) no ritmo do rodízio.`);
+      } else if (estado === "caida" && podeLembrar(horaSp(), ant.ultimo_aviso_em, ESPERA)) {
+        aviso = await avisar(sb, cfg, inst, FONE, MAIL, `Cobranca: ${inst} ainda fora do ar`,
+          `⏳ O número da ${inst} continua fora do ar há ${ha(row.pausada_em)}.\n\n` +
+          `${consequencia(dePe, RODIZIO.length)}\n${retidas} mensagem(ns) retida(s).\n\n` +
+          `Reconectou? libere aqui:\n${linkLiberar(inst)}`);
+      }
+
+      anterior[inst] = {
         estado,
         // `desde` e quando ESTE estado comecou, e nao quando o aviso saiu
-        desde: estadoAnterior.estado === estado ? (estadoAnterior.desde || agora) : agora,
+        desde: ant.estado === estado ? (ant.desde || agora) : agora,
         // so marca como avisado quando o aviso ENTROU na fila. Se falhou, o estado anterior
         // fica de pe e a proxima passada tenta de novo — senao uma falha de insercao
         // silenciaria o alerta para sempre.
-        ultimo_aviso_em: aviso.ok ? agora : (estadoAnterior.ultimo_aviso_em || null),
-      },
-    }).eq("id", 1);
+        ultimo_aviso_em: aviso.ok ? agora : (ant.ultimo_aviso_em || null),
+      };
+      saida.push({ instancia: inst, estado, mudou, retidas, avisado: aviso.ok, canais: { whatsapp: aviso.wpp || null, email: aviso.email || null }, aviso_falhou: aviso.motivo || null, desde: row.pausada_em });
+    }
 
-    return j({ ok: true, instancia: NOME_INST, estado, mudou, avisado: aviso.ok, canais: { whatsapp: aviso.wpp || null, email: aviso.email || null }, aviso_falhou: aviso.motivo || null, seguradas, desde: inst.pausada_em });
+    await sb.from("cobranca_config").update({ vigia_estado: { numeros: anterior } }).eq("id", 1);
+
+    return j({ ok: true, rodizio: RODIZIO, de_pe: dePe, numeros: saida,
+      cobranca_por_whatsapp: dePe > 0 ? "saindo" : "parada (so e-mail)" });
   } catch (e) { return j({ ok: false, erro: String(e) }, 500); }
 });
 

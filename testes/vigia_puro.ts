@@ -1,4 +1,4 @@
-// cobranca-vigia (v3) — olha o numero de WhatsApp da cobranca e AVISA uma pessoa quando ele cai.
+// cobranca-vigia (v4) — olha OS numeros de WhatsApp da cobranca e AVISA uma pessoa quando um cai.
 //
 // POR QUE EXISTE. Em 24/09 as 18:24 o ZaptosWPP escreveu, dentro da propria conversa, que a
 // "Nina Financeiro" estava desconectada. O trilho compartilhado fez a parte dele: pausou a
@@ -7,20 +7,29 @@
 // sistema se protegeu sozinho, e ninguem ficou sabendo. O numero passou 14 horas fora do ar e
 // a cobranca do dia simplesmente nao aconteceu — sem erro na tela, sem aviso, sem nada.
 //
-// Um robo que para sozinho e bom. Um robo que para sozinho e nao conta para ninguem vira um
-// dia perdido por semana. Esta funcao e so isso: contar.
+// E ACONTECEU DE NOVO, PIOR: o mesmo numero caiu em 25/09 as 10:56 e ficou 12 DIAS fora. O
+// aviso chegou a ser escrito, mas ficou preso na propria fila (o trilho foi desligado em
+// 06/10), e 145 mensagens de cobranca envelheceram esperando — 17 delas RESPOSTAS a clientes
+// que tinham escrito. Dai duas mudancas nesta versao e no resto do motor: o aviso tambem sai
+// por e-mail (que nao depende de instancia nenhuma) e a cobranca passou a ter DOIS numeros.
 //
-// O QUE ELA FAZ, a cada 10 minutos:
-//   1. le o estado da instancia da cobranca em instancia_ghl (pausada_em)
+// v4: UM VIGIA POR NUMERO. Desde 07/10 a cobranca alterna entre os numeros da Karla e da
+//     Bianca (`cobranca_config.instancias`). Vigiar so um deixaria o outro cair em silencio —
+//     que e exatamente o defeito que esta funcao existe para nao ter. Agora cada numero tem
+//     estado proprio em `vigia_estado.numeros`, e o aviso diz o que muda na pratica:
+//     com um numero de pe a cobranca CONTINUA, no dobro do tempo; com nenhum, ela para.
+//
+// O QUE ELA FAZ, a cada 10 minutos, para cada numero do rodizio:
+//   1. le o estado em instancia_ghl (pausada_em)
 //   2. compara com o que viu da ultima vez (cobranca_config.vigia_estado)
 //   3. CAIU   -> manda WhatsApp para o numero de alerta, por OUTRA instancia (a que caiu nao
-//                manda nada — seria pedir para o aparelho quebrado avisar que quebrou)
-//      VOLTOU -> avisa que voltou e quantas mensagens foram liberadas
-//      CONTINUA CAIDA -> lembra a cada N horas, so em horario comercial, para nao sumir do radar
+//                manda nada — seria pedir para o aparelho quebrado avisar que quebrou) e e-mail
+//      VOLTOU -> avisa que voltou e quantas mensagens estao retidas
+//      CONTINUA CAIDA -> lembra a cada N horas, so em horario comercial
 //
-// GET/POST ?liberar=1&k=<painel_chave>  tira a pausa depois que o numero voltou no Zaptos, e
-//   responde quantas mensagens estao liberadas. O link vai dentro do proprio aviso: quem
-//   reconectou o numero e quem sabe que ele voltou, e isso tem de ser um clique, nao um chamado.
+// GET/POST ?liberar=1&k=<painel_chave>[&instancia=Karla]  tira a pausa depois que o numero
+//   voltou no Zaptos. Sem `instancia`, libera todos os pausados do rodizio. O link vai dentro
+//   do proprio aviso: quem reconectou e quem sabe que voltou, e isso tem de ser um clique.
 //
 // O QUE ELA NAO FAZ. Ela nao tira a pausa sozinha. Nao da para saber daqui se o aparelho
 // voltou — o que temos e a ausencia de erro, que nao e a mesma coisa. Tirar a pausa no
@@ -47,5 +56,12 @@ export function podeLembrar(hora: number, ultimoEm: any, esperaHoras: number, ag
   if (hora < 8 || hora > 20) return false;
   if (!ultimoEm) return true;
   return agora - new Date(ultimoEm).getTime() >= esperaHoras * 3600000;
+}
+
+/** O que a queda DESTE numero significa para a cobranca, dado quantos sobraram de pe. */
+export function consequencia(dePe: number, total: number): string {
+  if (dePe === 0) return "A cobrança PAROU de enviar por WhatsApp — nenhum número de pé. O e-mail continua saindo.";
+  if (total <= 1) return "A cobrança PAROU de enviar por WhatsApp. O e-mail continua saindo.";
+  return `A cobrança CONTINUA pelo${dePe > 1 ? "s" : ""} ${dePe} número${dePe > 1 ? "s" : ""} que sobrou${dePe > 1 ? "ram" : ""}, no dobro do tempo por rodada.`;
 }
 

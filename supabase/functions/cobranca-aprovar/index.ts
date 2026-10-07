@@ -1,4 +1,16 @@
-// cobranca-aprovar (v5) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
+// cobranca-aprovar (v6) — aprova os cards da fila e dispara. Tudo pelo GHL, pela cobranca.
+//
+// v6: RODIZIO DE NUMEROS, RITMO PROPRIO E PORTA NO NUMERO DE DESTINO (pedidos de 07/10).
+//     - O WhatsApp sai alternando entre os numeros de `cobranca_config.instancias` (Karla e
+//       Bianca). Um numero so levou a cobranca ao chao duas vezes, e quem responde passa a cair
+//       no WhatsApp de quem tem alcada para prazo e desconto — a Nina nao tem.
+//     - A linha nasce `segurado`: o fila-processar nao a ve, e o cobranca-liberar solta uma por
+//       numero a cada 2 minutos. O ritmo deixa de depender do `fila_config`, que e
+//       compartilhado com as outras campanhas, e fila retida nunca explode na volta de uma queda.
+//     - Antes de enfileirar, o numero de destino passa pela porta: regra de forma aqui mesmo
+//       (fixo, DDD inexistente, digito repetido) e o veredito de `cobranca_fone`, escrito pelo
+//       cobranca-fones. Numero sem WhatsApp e tentativa morta, e tentativa morta acumulada e o
+//       que faz a Meta restringir o numero que manda (foi o fim da "Campanhas Nitron" em 27/08).
 //
 // v5: GRAVA UMA LINHA POR MENSAGEM em `cobranca_entrega`, e guarda o id do e-mail no GHL.
 //     Ate a v4 o que sobrava do disparo era o card ("enfileirado") e um resumo dentro de
@@ -58,6 +70,31 @@ const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/
 const digitos = (s: any) => String(s || "").replace(/\D/g, "");
 const e164 = (f: any) => { const d = digitos(f); return d ? (d.length <= 11 ? "+55" + d : "+" + d) : ""; };
 
+// DDDs que existem no Brasil
+const DDD = new Set([11,12,13,14,15,16,17,18,19,21,22,24,27,28,31,32,33,34,35,37,38,41,42,43,44,45,46,47,48,49,51,53,54,55,61,62,63,64,65,66,67,68,69,71,73,74,75,77,79,81,82,83,84,85,86,87,88,89,91,92,93,94,95,96,97,98,99]);
+
+/**
+ * A regra de forma do numero de destino: o que da para saber de graca, aqui, sem consultar
+ * ninguem. Fixo nao tem WhatsApp; DDD inexistente e digito repetido sao cadastro furado. Os
+ * tres viram tentativa morta, e tentativa morta acumulada e o que faz a Meta restringir o
+ * numero que manda (foi o que tirou a "Campanhas Nitron" do ar em 27/08).
+ *
+ * A MESMA regra existe no cobranca-fones e no `celularBom` do cobranca-refresh, de proposito:
+ * cada Edge Function e um deploy independente, e um import comum obrigaria a redeployar todas
+ * juntas. O teste `fone.teste.mjs` compara as tres com os mesmos casos — se divergirem, acusa.
+ */
+export function forma(bruto: any): { estado: "OK" | "FIXO" | "LIXO"; motivo?: string; e164: string } {
+  let d = digitos(bruto).replace(/^0+/, "");
+  if (d.startsWith("55") && d.length > 11) d = d.slice(2);
+  const cheio = d ? "55" + d : "";
+  if (d.length === 10) return { estado: "FIXO", motivo: "telefone fixo (10 digitos): nao tem WhatsApp", e164: cheio };
+  if (d.length !== 11) return { estado: "LIXO", motivo: `tem ${d.length} digito(s); celular brasileiro tem 11`, e164: cheio };
+  if (!DDD.has(Number(d.slice(0, 2)))) return { estado: "LIXO", motivo: `DDD ${d.slice(0, 2)} nao existe`, e164: cheio };
+  if (d[2] !== "9") return { estado: "FIXO", motivo: "o 3o digito nao e 9: nao e celular", e164: cheio };
+  if (/^(\d)\1+$/.test(d.slice(2))) return { estado: "LIXO", motivo: "digito repetido: cadastro furado", e164: cheio };
+  return { estado: "OK", e164: cheio };
+}
+
 /* --------------------------------------------------- cadastro da empresa no GHL */
 // location e token sao POR SUBCONTA e vem do cadastro `empresa`, nunca do fonte: o token da
 // Nitron responde 403 na location da Teak, e mandar para a subconta errada cria contato no
@@ -96,15 +133,15 @@ async function garantirContato(g: EmpGhl, canal: string, valor: string, nome: st
 
 /* ------------------------------------------------------------- empréstimo do dono */
 /** Poe o contato com a Nina, anotando antes de quem era. Devolve se conseguiu. */
-async function emprestar(sb: any, g: EmpGhl, contactId: string, donoAtual: string | null, nina: string, fone: string): Promise<{ ok: boolean; motivo?: string; trocado: boolean }> {
-  if (donoAtual === nina) return { ok: true, trocado: false };
+async function emprestar(sb: any, g: EmpGhl, contactId: string, donoAtual: string | null, donoNovo: string, fone: string): Promise<{ ok: boolean; motivo?: string; trocado: boolean }> {
+  if (donoAtual === donoNovo) return { ok: true, trocado: false };
   const { error } = await sb.from("campanha_dono_emprestado").upsert(
-    { contact_id: contactId, fone, dono_antes: donoAtual, dono_depois: nina, campanha: "cobranca" },
+    { contact_id: contactId, fone, dono_antes: donoAtual, dono_depois: donoNovo, campanha: "cobranca" },
     { onConflict: "contact_id,campanha", ignoreDuplicates: false },
   );
   // sem registro nao se troca: devolver viraria adivinhacao
   if (error) return { ok: false, trocado: false, motivo: "nao consegui registrar o dono anterior, nada foi trocado: " + (error.message || error) };
-  const r = await ghl(g, "PUT", `/contacts/${contactId}`, { assignedTo: nina });
+  const r = await ghl(g, "PUT", `/contacts/${contactId}`, { assignedTo: donoNovo });
   if (!r.ok) {
     await sb.from("campanha_dono_emprestado").delete().eq("contact_id", contactId).eq("campanha", "cobranca").is("devolvido_em", null);
     return { ok: false, trocado: false, motivo: "PUT assignedTo " + r.status };
@@ -169,15 +206,59 @@ Deno.serve(async (req) => {
     if (error) throw error;
     if (!cards?.length) return j({ ok: true, nada: "nenhum card aguardando com esse filtro", processados: 0 });
 
-    /* ---- a instancia que assina a cobranca ---- */
-    const { data: inst } = await sb.from("instancia_ghl").select("instancia,usuario_ghl_id,ativa,pausada_em").eq("instancia", NOME_INST).eq("empresa", empId).maybeSingle();
-    if (!inst?.usuario_ghl_id) return j({ ok: false, erro: `instancia "${NOME_INST}" sem usuario_ghl_id no cadastro instancia_ghl` }, 400);
-    if (inst.ativa !== true) return j({ ok: false, erro: `instancia "${NOME_INST}" esta inativa no cadastro` }, 409);
-    // pausada = o numero caiu. Nada de WhatsApp sai enquanto durar: enfileirar agora so
-    // encheria a fila para explodir na volta. Mas o e-mail nao tem instancia e nao tem dono,
-    // entao a rodada CONTINUA por e-mail — e quem so tem WhatsApp fica aguardando a proxima.
-    const wppPausado = !!inst.pausada_em;
-    const nina = String(inst.usuario_ghl_id);
+    /* ---- OS NUMEROS QUE ASSINAM A COBRANCA, EM RODIZIO ------------------------------
+       Pedido do gestor em 07/10: alternar entre o numero da Karla e o da Bianca. Um numero so
+       levou a cobranca ao chao duas vezes — "Campanhas Nitron" RESTRINGIDA pela Meta em 27/08,
+       "Nina Financeiro" 12 dias fora depois de 25/09 — e, alem do risco, quem responde a
+       cobranca cai no WhatsApp de quem TEM alcada para prazo e desconto, que a Nina nao tem.
+       `instancias` manda; sem ela, o campo antigo `instancia` continua valendo.
+       A pausada e PULADA, nao substituida: o numero de saida e o do dono do contato no CRM,
+       e o rodizio funciona emprestando o contato para a usuaria da vez. */
+    const RODIZIO: string[] = Array.isArray(cfg?.instancias) && cfg.instancias.length
+      ? cfg.instancias.map(String) : [NOME_INST];
+    const { data: instRows } = await sb.from("instancia_ghl")
+      .select("instancia,usuario_ghl_id,ativa,pausada_em").in("instancia", RODIZIO).eq("empresa", empId);
+    const cadastro: Record<string, any> = {};
+    for (const r of (instRows || [])) cadastro[String(r.instancia)] = r;
+
+    const semCadastro = RODIZIO.filter((n) => !cadastro[n]?.usuario_ghl_id);
+    if (semCadastro.length === RODIZIO.length) {
+      return j({ ok: false, erro: `nenhum numero do rodizio tem usuario_ghl_id no cadastro instancia_ghl: ${RODIZIO.join(", ")}` }, 400);
+    }
+    // de pe = cadastrada, ativa e nao pausada. A ordem do rodizio e a ordem do cadastro.
+    const dePe = RODIZIO.filter((n) => cadastro[n]?.usuario_ghl_id && cadastro[n]?.ativa === true && !cadastro[n]?.pausada_em);
+    const caidas = RODIZIO.filter((n) => !dePe.includes(n));
+    // nenhum numero de pe = mesma regra de antes: a rodada segue por e-mail, e quem so tem
+    // WhatsApp espera a proxima. Enfileirar agora encheria a fila para explodir na volta.
+    const wppPausado = dePe.length === 0;
+    let vez = 0;   // o rodizio: cada card que vai por WhatsApp pega o proximo numero
+
+    /* ---- A PORTA NO NUMERO DE DESTINO ----------------------------------------------
+       Pedido do gestor em 07/10: "validar o numero de WhatsApp de destino para nao cair em
+       spam e bloquear o numero na Meta". Mensagem para numero que nao tem WhatsApp e tentativa
+       morta, e tentativa morta acumulada e o que faz a Meta restringir quem manda.
+       Aqui a consulta e barata: o veredito ja esta em `cobranca_fone`, escrito pelo
+       cobranca-fones (regra de forma + ator Apify). Numero NUNCA consultado nao e barrado —
+       barrar o desconhecido pararia a cobranca na primeira rodada; o que e barrado e o que tem
+       veredito ruim, e a regra de forma (fixo, DDD inexistente, digito repetido) roda aqui
+       mesmo, sem depender de consulta nenhuma. */
+    const fonesDaRodada = [...new Set(cards.flatMap((c: any) =>
+      (Array.isArray(c.contatos) ? c.contatos : []).filter((x: any) => x.canal === "whatsapp" && x.valor).map((x: any) => e164(x.valor).replace(/^\+/, ""))))];
+    const veredito: Record<string, any> = {};
+    for (let i = 0; i < fonesDaRodada.length; i += 300) {
+      const { data } = await sb.from("cobranca_fone").select("fone,estado,motivo").in("fone", fonesDaRodada.slice(i, i + 300));
+      for (const r of (data || [])) veredito[String(r.fone)] = r;
+    }
+    /** Pode mandar WhatsApp para este numero? */
+    const portaDoFone = (valor: any): { ok: boolean; motivo?: string } => {
+      const f = forma(valor);
+      if (f.estado !== "OK") return { ok: false, motivo: f.motivo };
+      const v = veredito[f.e164];
+      if (v && ["INVALIDO", "FIXO", "LIXO"].includes(String(v.estado))) {
+        return { ok: false, motivo: String(v.motivo || "o validador recusou este numero") };
+      }
+      return { ok: true };
+    };
 
     const g = await empresaGhl(sb, empId);
     const resumo: any[] = [];
@@ -213,7 +294,16 @@ Deno.serve(async (req) => {
 
       // UM destino por canal, o de melhor prioridade. Mandar para todos os e-mails do
       // cadastro transforma uma cobranca em quatro, e o cliente responde a uma so.
-      const temWpp = CANAIS.includes("whatsapp") ? contatos.find((c) => c.canal === "whatsapp") : null;
+      // No WhatsApp a prioridade e a mesma, mas o numero tem de passar na porta: entre dois
+      // contatos, vale o primeiro que serve — e um fixo no campo "celular" do Sankhya nao
+      // elimina o grupo, so cede a vez ao proximo.
+      const candWpp = CANAIS.includes("whatsapp") ? contatos.filter((c) => c.canal === "whatsapp") : [];
+      let temWpp: any = null; let recusaFone: string | undefined;
+      for (const c of candWpp) {
+        const porta = portaDoFone(c.valor);
+        if (porta.ok) { temWpp = c; break; }
+        if (!recusaFone) recusaFone = `${c.valor}: ${porta.motivo}`;
+      }
       // com o numero caido o destino de WhatsApp some do card DESTA rodada, e so dela
       const alvoWpp = wppPausado ? null : temWpp;
       const alvoMail = CANAIS.includes("email") ? contatos.find((c) => c.canal === "email") : null;
@@ -222,7 +312,7 @@ Deno.serve(async (req) => {
          ir para a fila. Na proxima rodada ele e tentado de novo — e se o numero tiver voltado,
          sai normal. E o unico jeito de nao perder o cliente nem acumular envio represado. */
       if (wppPausado && temWpp && !alvoMail) {
-        const motivo = `o WhatsApp da cobranca esta fora do ar desde ${inst.pausada_em} e este grupo so tem WhatsApp — nada foi enviado; ele volta na proxima rodada`;
+        const motivo = `os numeros da cobranca (${RODIZIO.join(", ")}) estao fora do ar e este grupo so tem WhatsApp — nada foi enviado; ele volta na proxima rodada`;
         if (!seco) await sb.from("cobranca_fila").update({ status: "aguardando", motivo }).eq("id", card.id);
         resumo.push({ id: card.id, nome: card.nome, valor: card.valor, resultado: "segurado_wpp" });
         continue;
@@ -243,19 +333,29 @@ Deno.serve(async (req) => {
 
       const envios: any[] = [];
       const filaIds: number[] = [];
+      // nenhum numero do grupo passou na porta: nao e falha de envio, e cadastro. Fica escrito
+      // no card para alguem corrigir o telefone no Sankhya, e o grupo segue por e-mail.
+      if (candWpp.length && !temWpp && recusaFone) {
+        envios.push({ canal: "whatsapp", destino: String(candWpp[0].valor), origem: candWpp[0].origem, ok: false,
+          motivo: "numero recusado antes de enviar — " + recusaFone, em: new Date().toISOString() });
+      }
       // por onde a conversa vai continuar. O WhatsApp ganha do e-mail quando os dois saem:
       // e onde o cliente responde, e e la que a Nina consegue atender.
       let conversa: { contact_id: string; canal: string; destino: string } | null = null;
 
-      /* ---------- WhatsApp: empresta o contato e enfileira ---------- */
+      /* ---------- WhatsApp: escolhe o numero da vez, empresta o contato e RETEM ---------- */
       if (alvoWpp) {
-        const ct = await garantirContato(g, "whatsapp", alvoWpp.valor, alvoWpp.nome, card.grupo, FORCAR ? nina : undefined);
+        // o rodizio: o proximo numero de pe. `vez` so avanca quando um card de fato vai por
+        // WhatsApp — senao um grupo sem numero valido "gastaria" a vez e o rodizio desequilibraria.
+        const quem = dePe[vez % dePe.length];
+        const donoDaVez = String(cadastro[quem].usuario_ghl_id);
+        const ct = await garantirContato(g, "whatsapp", alvoWpp.valor, alvoWpp.nome, card.grupo, FORCAR ? donoDaVez : undefined);
         if (!ct) {
           envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo: "nao consegui achar/criar o contato no CRM", em: new Date().toISOString() });
         } else {
           let pronto = true; let motivo: string | undefined;
           if (FORCAR && !ct.criado) {
-            const emp = await emprestar(sb, g, ct.id, ct.dono_atual, nina, alvoWpp.valor);
+            const emp = await emprestar(sb, g, ct.id, ct.dono_atual, donoDaVez, alvoWpp.valor);
             if (!emp.ok) { pronto = false; motivo = emp.motivo; }
           }
           if (!pronto) {
@@ -264,18 +364,25 @@ Deno.serve(async (req) => {
             const { data: linha, error: eF } = await sb.from("fila_envio").insert({
               codparc: card.grupo, contact_id: ct.id, canal: "whatsapp",
               fone: alvoWpp.valor, nome: alvoWpp.nome || card.nome,
-              mensagem: card.mensagem, instancia: NOME_INST,
+              mensagem: card.mensagem, instancia: quem,
               campanha: "cobranca_" + card.fase, publico: "cliente", empresa: empId,
               // `imagens` e o campo que o fila-processar repassa como `attachments` do GHL:
               // para o Zaptos, o PDF do boleto e anexo igual a qualquer outro.
               imagens: urls.length ? urls : null,
-              status: "pendente",
+              /* RETIDA, nao pendente. O fila-processar so olha 'pendente'/'agendado', entao
+                 esta linha nao sai sozinha: quem solta e o cobranca-liberar, uma por numero a
+                 cada 2 minutos (pedido do gestor em 07/10). Duas consequencias boas:
+                 o ritmo nao depende do fila_config, que e compartilhado com as outras
+                 campanhas; e uma queda de numero nao vira avalanche na volta — o que ficou
+                 retido escoa no mesmo ritmo, e nao de uma vez. */
+              status: "segurado",
             }).select("id").maybeSingle();
             if (eF) envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo: "fila_envio: " + eF.message, em: new Date().toISOString() });
             else {
+              vez++;
               if (linha?.id) filaIds.push(Number(linha.id));
               conversa = { contact_id: ct.id, canal: "whatsapp", destino: alvoWpp.valor };
-              envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: true, fila_id: linha?.id ?? null, anexos: urls.length, em: new Date().toISOString() });
+              envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: true, fila_id: linha?.id ?? null, anexos: urls.length, instancia: quem, em: new Date().toISOString() });
             }
           }
         }
@@ -375,9 +482,13 @@ Deno.serve(async (req) => {
       // e tantos ficaram esperando o WhatsApp voltar
       whatsapp_pausado: wppPausado,
       segurados_ate_o_whatsapp_voltar: conta((r) => r.resultado === "segurado_wpp"),
-      whatsapp_na_fila: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "whatsapp" && e.ok).length, 0),
+      // retidas, e nao "na fila": elas nao saem sozinhas. Quem solta e o cobranca-liberar, uma
+      // por numero a cada `wpp_intervalo_seg` — por isso a resposta diz tambem a previsao.
+      whatsapp_retidas: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "whatsapp" && e.ok).length, 0),
       email_enviado: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "email" && e.ok).length, 0),
-      instancia: NOME_INST,
+      numeros_recusados_antes_de_enviar: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "whatsapp" && !e.ok && /recusado antes de enviar/.test(String(e.motivo || ""))).length, 0),
+      rodizio: dePe, numeros_fora_do_ar: caidas.length ? caidas : undefined,
+      por_numero: dePe.map((n) => ({ instancia: n, mensagens: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.instancia === n && e.ok).length, 0) })),
       lembrete: "os contatos emprestados voltam com: campanha-dono { acao:'devolver', campanha:'cobranca' }",
       itens: resumo,
     });

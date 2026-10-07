@@ -1,4 +1,4 @@
-// cobranca-painel (v9) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v10) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -52,6 +52,15 @@
 //       - a palavra mudou. A v8 escrevia "WhatsApp entregue"; ninguem nos devolve confirmacao
 //         de entrega do WhatsApp, entao agora e "saiu". `entregue`/`aberto` so no e-mail, e so
 //         quando o GHL confirma — o cobranca-entregas pergunta pelo id que o aprovar v5 grava.
+//
+// v10: a tela do rodizio (07/10). Diz por qual numero cada mensagem saiu (Karla ou Bianca),
+//      conta o tempo pelo ritmo da cobranca — 2 min por numero, dividido pelos numeros de pe —
+//      avisa quando um dos dois esta fora do ar (a rodada sai no dobro do tempo, nao para),
+//      marca a mensagem RETIDA como ritmo e nao como travamento, e conta quantos numeros da
+//      rodada ainda nao passaram pela conferencia de WhatsApp. Conserta tambem um erro antigo:
+//      o `cobranca_config` era lido sem as colunas de regra (valor_min, atraso, cap), entao a
+//      previa do proximo lote usava o teto PADRAO de 40 em vez do configurado — ela dizia
+//      "4 rodadas" onde o certo era menos.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
@@ -117,7 +126,7 @@ export const ESTADO: Record<string, { txt: string; cor: string }> = {
 export function doFila(status: string): "na_fila" | "saiu" | "erro" {
   if (status === "enviado") return "saiu";
   if (status === "erro") return "erro";
-  return "na_fila";
+  return "na_fila";   // pendente, agendado, enviando e tambem 'segurado' (retida pelo ritmo)
 }
 
 /**
@@ -126,13 +135,18 @@ export function doFila(status: string): "na_fila" | "saiu" | "erro" {
  * `fila` e o mapa id -> linha do fila_envio. Quando a linha existe ela ganha do livro: e a
  * fonte, e o livro e so a copia que o cron atualiza.
  */
-export function estadoDaEntrega(e: any, fila: Record<string, any>): { estado: string; quando: string; nota: string } {
+export function estadoDaEntrega(e: any, fila: Record<string, any>): { estado: string; quando: string; nota: string; por?: string } {
   const f = e.canal === "whatsapp" && e.fila_id ? fila[String(e.fila_id)] : null;
   if (f) {
     const estado = doFila(String(f.status || ""));
-    if (estado === "erro") return { estado, quando: hhmm(f.enviado_em), nota: String(f.resultado || f.erro || e.detalhe || "").slice(0, 160) };
-    if (estado === "saiu") return { estado, quando: hhmm(f.enviado_em), nota: "" };
-    return { estado, quando: hhmm(f.criado_em), nota: "esperando a vez na fila" };
+    const por = f.instancia ? String(f.instancia) : undefined;
+    if (estado === "erro") return { estado, quando: hhmm(f.enviado_em), nota: String(f.resultado || f.erro || e.detalhe || "").slice(0, 160), por };
+    if (estado === "saiu") return { estado, quando: hhmm(f.enviado_em), nota: "", por };
+    // 'segurado' nao e congestionamento: e o ritmo, de proposito. A tela precisa dizer isso,
+    // senao quem olha vai concluir que travou e mexer onde nao deve.
+    const retida = String(f.status || "") === "segurado";
+    return { estado, quando: hhmm(f.criado_em),
+      nota: retida ? "retida: sai no ritmo do rodízio (1 a cada 2 min por número)" : "esperando a vez na fila", por };
   }
   const estado = String(e.estado || "na_fila");
   if (estado === "erro") return { estado, quando: hhmm(e.criado_em), nota: String(e.detalhe || "").slice(0, 160) };
@@ -153,12 +167,13 @@ function entrega(c: any, porCard: Record<string, any[]>, fila: Record<string, an
   const rows = porCard[String(c.id)] || [];
   if (!rows.length) return "";
   const linhas = rows.map((e: any) => {
-    const { estado, quando, nota } = estadoDaEntrega(e, fila);
+    const { estado, quando, nota, por } = estadoDaEntrega(e, fila);
     const cor = (ESTADO[estado] || ESTADO.na_fila).cor;
     const txt = (ESTADO[estado] || { txt: estado }).txt;
     return `<div class="ent">
       <span class="selo" style="background:${cor}">${esc(txt)}${quando ? " " + esc(quando) : ""}</span>
       <b>${esc(CANAL_ROTULO[e.canal] || e.canal)}</b> <span class="para">${esc(e.destino)}</span>
+      ${por ? `<span class="quem">pelo número da ${esc(por)}</span>` : ""}
       ${nota ? `<span class="quem">${esc(nota)}</span>` : ""}</div>`;
   }).join("");
   return `<div class="entrega">${linhas}</div>`;
@@ -196,11 +211,11 @@ function pagina(cards: any[], ctx: any): string {
   const total = cards.reduce((a, c) => a + Number(c.valor || 0), 0);
 
   /* QUANTO TEMPO ISTO VAI LEVAR, antes de clicar.
-     O WhatsApp nao sai de uma vez: o trilho espaca as mensagens para o numero nao ser
-     restringido pelo WhatsApp (foi o que tirou a "Campanhas Nitron" do ar em 27/08). Medido
-     no disparo de 24/09: 22 mensagens em 1.191s, ou 54s por mensagem, para 45s configurados
-     — os 20% de sobra sao a granularidade do processador, que roda 1x por minuto. Entao a
-     conta e o intervalo configurado vezes 1,2, e nao um numero chutado aqui.
+     O WhatsApp nao sai de uma vez, e desde 07/10 o ritmo e da COBRANCA e nao do trilho
+     compartilhado: cada numero do rodizio solta uma mensagem a cada `wpp_intervalo_seg`
+     (120s por pedido do gestor), e sao dois numeros alternando. Entao o tempo por mensagem
+     na rodada e o intervalo dividido pelos numeros de pe — com um numero fora do ar, a
+     mesma rodada leva o dobro, e a tela precisa dizer isso ANTES do clique.
      O e-mail sai na hora e por isso nao entra na conta. */
   const aguardando = cards.filter((c: any) => c.status === "aguardando");
   const temCanal = (c: any, canal: string) => (Array.isArray(c.contatos) ? c.contatos : []).some((x: any) => x.canal === canal);
@@ -211,6 +226,11 @@ function pagina(cards: any[], ctx: any): string {
   // subtracao dava 0 num caso com 1 grupo so de WhatsApp — o teste local pegou.
   const soWpp = aguardando.filter((c: any) => temCanal(c, "whatsapp") && !temCanal(c, "email")).length;
   const minutos = Math.round((porWpp * Number(ctx.segPorMsg || 54)) / 60);
+  // a janela de cobranca (8h-20h) corta o envio: uma rodada de 4h aprovada as 18h termina
+  // amanha de manha, e e melhor a pessoa saber disso antes de clicar do que depois.
+  const horaAgora = Number(new Date().toLocaleString("en-GB", { timeZone: "America/Sao_Paulo", hour: "2-digit", hour12: false }).slice(0, 2));
+  const sobraHoje = Math.max(0, (Number(ctx.janelaAte ?? 20) - Math.max(horaAgora, Number(ctx.janelaDe ?? 8))) * 60);
+  ctx.terminaEm = minutos <= sobraHoje ? "hoje" : `amanhã (a janela de cobrança fecha às ${Number(ctx.janelaAte ?? 20)}h e reabre às ${Number(ctx.janelaDe ?? 8)}h)`;
   const tempo = minutos < 1 ? "menos de 1 min" : (minutos < 90 ? `${minutos} min` : `${Math.floor(minutos / 60)}h${String(minutos % 60).padStart(2, "0")}`);
   const cartoes = cards.map((c) => {
     const contatos = (Array.isArray(c.contatos) ? c.contatos : []);
@@ -291,10 +311,14 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 <h1>Cobrança — ${ctx.fase === "vencido" ? "títulos vencidos" : "a vencer na próxima semana"}</h1>
 <div class="sub">rodada ${esc(ctx.rodada)} · ${cards.length} grupo(s) · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
 ${ctx.wppPausado
-  ? `<div class="alerta">O WhatsApp da cobrança está fora do ar desde ${esc(ctx.pausadaDesde)}.
+  ? `<div class="alerta">Nenhum número da cobrança está de pé${ctx.caidas?.length ? " (" + esc(ctx.caidas.join(", ")) + ")" : ""}.
        Aprovando agora, saem <b>${porMail} por e-mail</b>, na hora.
        ${soWpp > 0 ? `<b>${soWpp} grupo(s) só têm WhatsApp</b> e ficam para a próxima rodada.` : "Nenhum grupo depende só de WhatsApp."}</div>`
-  : (porWpp ? `<div class="ritmo"><b>${porWpp}</b> por WhatsApp — o envio leva cerca de <b>${tempo}</b>, porque as mensagens saem espaçadas para o número não ser restringido${porMail ? ` · <b>${porMail}</b> por e-mail, que sai na hora` : ""}</div>` : "")}
+  : (porWpp ? `<div class="ritmo"><b>${porWpp}</b> por WhatsApp, alternando entre <b>${esc((ctx.rodizio || []).join(" e "))}</b>
+       — uma mensagem por número a cada ${Math.round(Number(ctx.intervaloSeg || 120) / 60)} min, então o envio leva cerca de <b>${tempo}</b>
+       e termina ${esc(ctx.terminaEm || "no mesmo dia")}${porMail ? ` · <b>${porMail}</b> por e-mail, que sai na hora` : ""}
+       ${ctx.caidas?.length ? `<br><b style="color:#c60">${esc(ctx.caidas.join(", "))} fora do ar</b> — a rodada inteira sai pelo(s) número(s) que sobrou, no dobro do tempo.` : ""}
+       ${ctx.semVeredito ? `<br>${ctx.semVeredito} número(s) ainda sem conferência de WhatsApp; a validação roda de 5 em 5 min e o que for fixo ou inexistente vai só por e-mail.` : ""}</div>` : "")}
 <div class="barra">
   <button id="todos">Marcar todos</button><button id="nenhum">Desmarcar</button>
   <span style="flex:1"></span>
@@ -767,7 +791,7 @@ async function dadosEntregas(sb: any, opts: { dias: number; rodada: string | nul
   const ids = [...new Set(rows.filter((r: any) => r.canal === "whatsapp" && r.fila_id).map((r: any) => Number(r.fila_id)))];
   const fila: Record<string, any> = {};
   for (let i = 0; i < ids.length; i += 500) {
-    const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado,erro").in("id", ids.slice(i, i + 500));
+    const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado,erro,instancia").in("id", ids.slice(i, i + 500));
     for (const f of (data || [])) fila[String(f.id)] = f;
   }
 
@@ -791,7 +815,7 @@ function paginaEntregas(d: any, ctx: any): string {
     return `<tr>
       <td class="num">${esc(qdo(e.criado_em))}</td>
       <td>${esc(e.nome || "grupo " + e.grupo)}</td>
-      <td>${esc(CANAL_ROTULO[e.canal] || e.canal)}</td>
+      <td>${esc(CANAL_ROTULO[e.canal] || e.canal)}${e.agora.por ? ' <span class="mut">' + esc(e.agora.por) + "</span>" : ""}</td>
       <td>${esc(e.destino)}</td>
       <td><span class="selo" style="background:${cor}">${esc((ESTADO[estado] || { txt: estado }).txt)}${quando ? " " + esc(quando) : ""}</span></td>
       <td class="mut">${esc(nota || "")}</td></tr>`;
@@ -868,7 +892,7 @@ Deno.serve(async (req) => {
     const fase = u.searchParams.get("fase") || "vencido";
 
     const { data: cfg } = await sb.from("cobranca_config")
-      .select("ativo,instancia,atende_ativo,toques_max,painel_chave").eq("id", 1).maybeSingle();
+      .select("ativo,instancia,instancias,wpp_intervalo_seg,janela_hora_de,janela_hora_ate,atende_ativo,toques_max,painel_chave,valor_min,atraso_min,atraso_max,cap_grupos_run").eq("id", 1).maybeSingle();
 
     // A tela mostra nome, CNPJ e divida de cliente, e o botao dispara mensagem de verdade.
     // Enquanto `painel_chave` estiver vazia a porta fica aberta (era assim antes); com chave
@@ -931,12 +955,15 @@ Deno.serve(async (req) => {
       .eq("rodada", rodada).eq("fase", fase).order("valor", { ascending: false }).limit(300);
     if (error) throw error;
 
-    /* O estado do numero e o ritmo, para a tela dizer quanto tempo o disparo leva e o que
-       acontece com o numero fora do ar — as duas perguntas que so apareciam DEPOIS do clique. */
-    const [instR, ritmoR] = await Promise.all([
-      sb.from("instancia_ghl").select("pausada_em").eq("instancia", cfg?.instancia || "Nina").maybeSingle(),
-      sb.from("fila_config").select("wpp_intervalo_seg").eq("id", 1).maybeSingle(),
-    ]);
+    /* O estado dos numeros e o ritmo, para a tela dizer quanto tempo o disparo leva e o que
+       acontece com um numero fora do ar — as duas perguntas que so apareciam DEPOIS do clique.
+       Desde 07/10 sao DOIS numeros em rodizio (Karla e Bianca) e o ritmo e da cobranca, nao do
+       fila_config: `wpp_intervalo_seg` por numero, dividido pelos numeros de pe. */
+    const rodizio: string[] = Array.isArray(cfg?.instancias) && cfg.instancias.length
+      ? cfg.instancias.map(String) : [String(cfg?.instancia || "Nina")];
+    const { data: instRows } = await sb.from("instancia_ghl").select("instancia,ativa,pausada_em").in("instancia", rodizio);
+    const dePe = rodizio.filter((n) => (instRows || []).some((r: any) => r.instancia === n && r.ativa === true && !r.pausada_em));
+    const caidas = rodizio.filter((n) => !dePe.includes(n));
 
     /* ---- o que ACONTECEU com CADA mensagem do que ja foi aprovado ---------------------
        Duas leituras, e as duas precisam existir:
@@ -970,7 +997,7 @@ Deno.serve(async (req) => {
       .filter(Boolean);
     const fila: Record<string, any> = {};
     for (let i = 0; i < ids.length; i += 500) {
-      const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado,erro").in("id", ids.slice(i, i + 500));
+      const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado,erro,instancia").in("id", ids.slice(i, i + 500));
       for (const f of (data || [])) fila[String(f.id)] = f;
     }
 
@@ -979,14 +1006,30 @@ Deno.serve(async (req) => {
        quem pediu para nao receber. Nao repete quem ja esta nesta rodada. E previa, e a tela
        diz isso: a selecao real acontece no proximo montar, com o Sankhya relido. */
     const proximos = await previaProximos(sb, cfg, cards || [], fase);
-    const pausadaEm = instR.data?.pausada_em || null;
-    // 1,2 = o que o processador acrescenta ao intervalo configurado (ver o comentario em pagina())
-    const segPorMsg = Math.round(Number(ritmoR.data?.wpp_intervalo_seg ?? 45) * 1.2);
+    const intervaloSeg = Math.max(30, Number(cfg?.wpp_intervalo_seg ?? 120));
+    // com dois numeros alternando, o tempo por mensagem DA RODADA e o intervalo dividido pelos
+    // numeros de pe. Nenhum de pe: a conta nao importa, a faixa ambar assume a tela.
+    const segPorMsg = Math.round(intervaloSeg / Math.max(1, dePe.length));
+
+    /* Quantos numeros desta rodada ainda nao foram conferidos. A tela diz isso porque o
+       cobranca-aprovar barra numero com veredito ruim: sem a conferencia, o grupo pode cair
+       para e-mail na hora do clique, e quem aprova merece saber antes. */
+    const fonesDaRodada = [...new Set((cards || []).flatMap((c: any) =>
+      (Array.isArray(c.contatos) ? c.contatos : []).filter((x: any) => x.canal === "whatsapp" && x.valor)
+        .map((x: any) => { const d = String(x.valor).replace(/\D/g, "").replace(/^0+/, ""); return d.startsWith("55") && d.length > 11 ? d : "55" + d; })))];
+    let comVeredito = 0;
+    for (let i = 0; i < fonesDaRodada.length; i += 300) {
+      const { count } = await sb.from("cobranca_fone").select("fone", { count: "exact", head: true })
+        .in("fone", fonesDaRodada.slice(i, i + 300)).neq("estado", "RODANDO");
+      comVeredito += Number(count || 0);
+    }
 
     return new Response(pagina(cards || [], {
-      rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true, sufixo,
-      wppPausado: !!pausadaEm, segPorMsg, porCard, fila, proximos,
-      pausadaDesde: pausadaEm ? new Date(pausadaEm).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "",
+      rodada, fase, instancia: dePe.join(" e ") || rodizio.join(" e "), desligado: cfg?.ativo !== true, sufixo,
+      wppPausado: dePe.length === 0, segPorMsg, porCard, fila, proximos,
+      rodizio: dePe, caidas, intervaloSeg,
+      janelaDe: Number(cfg?.janela_hora_de ?? 8), janelaAte: Number(cfg?.janela_hora_ate ?? 20),
+      semVeredito: Math.max(0, fonesDaRodada.length - comVeredito),
       // com a query inteira: e por ela que a chave chega ao POST
       api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel" + u.search,
     }), {

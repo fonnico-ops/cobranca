@@ -17,3 +17,6 @@ testes/titulos-refresh_puro.*
 testes/refresh_puro.mjs
 testes/entregas_puro.*
 testes/vigia_puro.mjs
+testes/liberar_puro.*
+testes/fones_puro.*
+testes/aprovar_puro.*

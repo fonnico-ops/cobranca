@@ -27,5 +27,20 @@ ok(podeLembrar(12, atras(179), 3, AGORA) === false, "faltando 1 min para a esper
 ok(podeLembrar(12, atras(180), 3, AGORA) === true, "espera cumprida no minuto exato: lembra");
 ok(podeLembrar(12, atras(60), 1, AGORA) === true, "espera configuravel de 1h");
 
+// --- v4: um vigia por numero (rodizio Karla/Bianca, 07/10) ---------------------------------
+// O aviso tem de dizer o que a queda significa NA PRATICA. Com dois numeros, a queda de um
+// nao para a cobranca — e dizer "a cobranca PAROU" quando ela nao parou treina quem le a
+// ignorar o aviso, que e o jeito mais rapido de voltar ao silencio de 12 dias de 25/09.
+{
+  const { consequencia } = await import("./vigia_puro.mjs");
+  const diz = (c, m) => { if (c) console.log("  ok   " + m); else { console.log("  FALHA " + m); falhas++; } };
+  console.log("6) o aviso diz a consequencia certa");
+  diz(/CONTINUA/.test(consequencia(1, 2)), "2 numeros, 1 de pe -> a cobranca CONTINUA, no dobro do tempo");
+  diz(/dobro/.test(consequencia(1, 2)), "e diz que leva o dobro do tempo");
+  diz(/PAROU/.test(consequencia(0, 2)), "nenhum de pe -> PAROU");
+  diz(/e-mail continua/i.test(consequencia(0, 2)), "e lembra que o e-mail continua saindo");
+  diz(/PAROU/.test(consequencia(0, 1)), "um numero so, caido -> PAROU");
+}
+
 console.log(falhas ? `\n${falhas} FALHA(S)` : "\nTodos os testes passaram.");
 process.exit(falhas ? 1 : 0);

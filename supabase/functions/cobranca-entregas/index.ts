@@ -105,6 +105,19 @@ Deno.serve(async (req) => {
       wppMudou++;
     }
 
+    /* `checado_em` em TODAS as que foram olhadas, numa tacada.
+       Sem isto, uma rodada em que nada mudou (o caso comum) nao deixava marca nenhuma, e o
+       painel escrevia "conferido pela ultima vez: nunca" com o cron rodando de 10 em 10
+       minutos — pior do que nao mostrar nada, porque faz duvidar do dado que esta certo.
+       Um UPDATE por lote de 500, e nao um por linha: a marca e a mesma para todas. */
+    if (!seco && (wpp || []).length) {
+      const vistas = (wpp || []).map((x: any) => Number(x.id));
+      const agora = new Date().toISOString();
+      for (let i = 0; i < vistas.length; i += 500) {
+        await sb.from("cobranca_entrega").update({ checado_em: agora }).in("id", vistas.slice(i, i + 500));
+      }
+    }
+
     /* ---------------- E-mail: quem sabe e o GHL ---------------- */
     // Ordem: quem nunca foi conferido primeiro, depois o check mais antigo. `entregue` continua
     // na roda porque ainda pode virar `aberto`; passados `dias` o assunto morre — e-mail que nao

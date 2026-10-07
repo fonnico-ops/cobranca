@@ -51,17 +51,28 @@ const S = (x: any) => { const s = String(x ?? "").trim(); return s || null; };
 const N = (x: any) => Number(x) || 0;
 const digitos = (x: any) => String(x ?? "").replace(/\D/g, "");
 
+// DDDs que existem no Brasil. A mesma lista esta no cobranca-aprovar e no cobranca-fones —
+// cada Edge Function e um deploy independente, e o `fone.teste.mjs` compara as tres.
+const DDD = new Set([11,12,13,14,15,16,17,18,19,21,22,24,27,28,31,32,33,34,35,37,38,41,42,43,44,45,46,47,48,49,51,53,54,55,61,62,63,64,65,66,67,68,69,71,73,74,75,77,79,81,82,83,84,85,86,87,88,89,91,92,93,94,95,96,97,98,99]);
+
 /**
  * Celular brasileiro com DDD: 11 digitos e o nono e 9. O campanhas-enviar recusa numero
  * de 10 digitos ("telefone fixo (sem WhatsApp)"), entao filtrar aqui evita encher a
  * fila_envio de linhas que nascem condenadas.
+ *
+ * As duas regras acrescentadas em 07/10 vieram de numero real na carteira:
+ *   - DDD que nao existe (ex.: 20) e digito errado na digitacao, e a mensagem nao chega a
+ *     ninguem — tentativa morta, que e o que faz a Meta restringir o numero que manda;
+ *   - o lixo classico do cadastro e 11999999999: a repeticao esta no NUMERO, nao no DDD, e a
+ *     regra antiga (testar a string toda) deixava passar.
  */
-function celularBom(v: any): string | null {
+export function celularBom(v: any): string | null {
   let d = digitos(v).replace(/^0+/, "");
   if (d.startsWith("55") && d.length > 11) d = d.slice(2);
   if (d.length !== 11) return null;
+  if (!DDD.has(Number(d.slice(0, 2)))) return null;
   if (d[2] !== "9") return null;
-  if (/^(\d)\1+$/.test(d)) return null;       // 99999999999 e cadastro-lixo
+  if (/^(\d)\1+$/.test(d.slice(2))) return null;   // 11999999999 e cadastro-lixo
   return d;
 }
 const emailBom = (v: any): string | null => {

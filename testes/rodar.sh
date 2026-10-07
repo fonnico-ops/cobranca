@@ -17,7 +17,7 @@ const s=fs.readFileSync("../supabase/functions/cobranca-montar/index.ts","utf8")
 fs.writeFileSync("montar_puro.ts", s.slice(0, s.indexOf("Deno.serve(")).replace(/^import .*$/m,"") +
 "\nexport { linhasTitulos, primeiroNome, nomeGentil, textoVencido, textoAVencer, html, assinar, sobreOsBoletos, TETO_WPP, TETO_EMAIL, MARCA_BOLETOS, MARCA_RODAPE };\n");
 // atende e seguir ja usam `export function`: aqui basta fatiar.
-for (const fn of ["cobranca-atende","cobranca-seguir","cobranca-emitidos","cobranca-painel","cobranca-refresh","cobranca-vigia","cobranca-entregas"]) {
+for (const fn of ["cobranca-atende","cobranca-seguir","cobranca-emitidos","cobranca-painel","cobranca-refresh","cobranca-vigia","cobranca-entregas","cobranca-liberar","cobranca-fones","cobranca-aprovar"]) {
   const t=fs.readFileSync("../supabase/functions/"+fn+"/index.ts","utf8");
   fs.writeFileSync(fn.replace("cobranca-","")+"_puro.ts", t.slice(0, t.indexOf("Deno.serve(")).replace(/^import .*$/gm,""));
 }'
@@ -34,9 +34,12 @@ $ESB painel_puro.ts   --format=esm --outfile=painel_puro.mjs   --log-level=error
 $ESB refresh_puro.ts   --format=esm --outfile=refresh_puro.mjs --log-level=error
 $ESB vigia_puro.ts     --format=esm --outfile=vigia_puro.mjs     --log-level=error
 $ESB entregas_puro.ts  --format=esm --outfile=entregas_puro.mjs  --log-level=error
+$ESB liberar_puro.ts   --format=esm --outfile=liberar_puro.mjs   --log-level=error
+$ESB fones_puro.ts     --format=esm --outfile=fones_puro.mjs     --log-level=error
+$ESB aprovar_puro.ts   --format=esm --outfile=aprovar_puro.mjs   --log-level=error
 
 falhou=0
-for t in boleto_pdf qr montar boleto_mensagem assinatura marca conversa emitidos saude fase vigia entregas; do
+for t in boleto_pdf qr montar boleto_mensagem assinatura marca conversa emitidos saude fase vigia entregas fone ritmo; do
   printf '%-18s ' "$t"
   if saida=$(node "$t.teste.mjs" 2>&1); then echo "$saida" | tail -1
   else echo "FALHOU"; echo "$saida"; falhou=1; fi

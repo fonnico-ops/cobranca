@@ -14,7 +14,13 @@ function podeLembrar(hora, ultimoEm, esperaHoras, agora = Date.now()) {
   if (!ultimoEm) return true;
   return agora - new Date(ultimoEm).getTime() >= esperaHoras * 36e5;
 }
+function consequencia(dePe, total) {
+  if (dePe === 0) return "A cobran\xE7a PAROU de enviar por WhatsApp \u2014 nenhum n\xFAmero de p\xE9. O e-mail continua saindo.";
+  if (total <= 1) return "A cobran\xE7a PAROU de enviar por WhatsApp. O e-mail continua saindo.";
+  return `A cobran\xE7a CONTINUA pelo${dePe > 1 ? "s" : ""} ${dePe} n\xFAmero${dePe > 1 ? "s" : ""} que sobrou${dePe > 1 ? "ram" : ""}, no dobro do tempo por rodada.`;
+}
 export {
+  consequencia,
   ha,
   podeLembrar
 };
