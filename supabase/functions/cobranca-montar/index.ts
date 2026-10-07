@@ -82,7 +82,7 @@ function primeiroNome(s: any): string {
   if (!/^\p{L}/u.test(p)) return "";                       // "001", "3M", "-"
   const limpo = p.replace(/[^\p{L}]/gu, "");
   if (limpo.length < 3) return "";
-  const chave = limpo.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const chave = limpo.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
   if (NAO_E_NOME.has(chave)) return "";
   // O cadastro nao tem padrao de caixa: o card de 22/09 do grupo 65542 abriu com
   // "Ola, lorrany!" porque o contato esta em minuscula no TGFCTT. Entao normaliza —
@@ -335,7 +335,7 @@ function textoAVencer(ctx: any): string {
 
 /** O e-mail leva o mesmo conteudo. Com link, um botao por link; sem link, um botao por PDF. */
 function html(texto: string, boletos: any[], links: any[] = []): string {
-  // o rodape da assinatura vai em corpo menor e cinza, separado por um filete \u2014 no e-mail
+  // o rodape da assinatura vai em corpo menor e cinza, separado por um filete — no e-mail
   // ele e identificacao, nao mensagem, e com o mesmo peso do texto competiria com a cobranca
   const [acima, abaixo] = (() => {
     const i = texto.indexOf(MARCA_RODAPE);

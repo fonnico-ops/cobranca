@@ -1,4 +1,4 @@
-// cobranca-entregas (v1) — CONFERE, MENSAGEM POR MENSAGEM, O QUE ACONTECEU DEPOIS DO DISPARO.
+// cobranca-entregas (v2) — CONFERE, MENSAGEM POR MENSAGEM, O QUE ACONTECEU DEPOIS DO DISPARO.
 //
 // O painel sabia responder "o card foi aprovado?". Quem cobra pergunta outra coisa: "a mensagem
 // para ESTE numero saiu? o e-mail para ESTE endereco chegou?". Um card sao duas mensagens, com
@@ -59,6 +59,54 @@ async function tokenGhl(sb: any, empId: string) {
   const tokEnv = String(data?.ghl_token_env || "GHL_TOKEN");
   const tok = Deno.env.get(tokEnv) || Deno.env.get("GHL_TOKEN") || "";
   return tok;
+}
+
+
+/* ---------------------------------------------- o MCP da Nitron (mesmo cliente do montar)
+ * Repetido de proposito: cada Edge Function e um deploy independente, e um import comum
+ * obrigaria a redeployar as duas juntas. O guia e o mesmo: JSON-RPC em /mcp, Accept com os
+ * dois tipos (senao 406), `isError` no result quando a tool recusa, e 429 com Retry-After.
+ */
+const MCP_URL = "https://mcp-y7bu.onrender.com/mcp";
+
+async function chaveMcp(sb: any): Promise<{ chave: string; header: string; prefixo: string }> {
+  const header = Deno.env.get("NITRON_MCP_HEADER") || "Authorization";
+  const prefixo = Deno.env.get("NITRON_MCP_PREFIXO") ?? (header === "Authorization" ? "Bearer " : "");
+  const doEnv = Deno.env.get("NITRON_MCP_KEY");
+  if (doEnv) return { chave: doEnv, header, prefixo };
+  const { data } = await sb.from("motor_config").select("valor").eq("chave", "NITRON_MCP_KEY").maybeSingle();
+  return { chave: String(data?.valor || ""), header, prefixo };
+}
+
+async function mcpTool(cred: { chave: string; header: string; prefixo: string }, tool: string, args: any): Promise<any> {
+  const r = await fetch(MCP_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+      [cred.header]: cred.prefixo + cred.chave,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: tool, arguments: args } }),
+  });
+  if (r.status === 429) {
+    const espera = Math.min(30, Number(r.headers.get("Retry-After") || 5));
+    await new Promise((res) => setTimeout(res, espera * 1000));
+    return await mcpTool(cred, tool, args);
+  }
+  const txt = await r.text();
+  if (!r.ok) throw new Error(`MCP ${tool} ${r.status}: ${txt.slice(0, 200)}`);
+  const cru = txt.startsWith("data:") ? txt.split(/\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("") : txt;
+  let d: any = {};
+  try { d = JSON.parse(cru); } catch { throw new Error(`MCP ${tool}: resposta ilegivel: ${txt.slice(0, 200)}`); }
+  if (d.error) throw new Error(`MCP ${tool}: ${d.error.message || JSON.stringify(d.error).slice(0, 200)}`);
+  if (d?.result?.isError) {
+    const txtErro = (d.result.content || []).map((c: any) => c?.text || "").join(" ").slice(0, 200);
+    throw new Error(`MCP ${tool}: ${txtErro || "a tool respondeu isError sem texto"}`);
+  }
+  const conteudo = d?.result?.content;
+  const texto = Array.isArray(conteudo) ? conteudo.map((c: any) => c?.text || "").join("") : "";
+  if (texto) { try { return JSON.parse(texto); } catch { return { texto }; } }
+  return d?.result?.structuredContent ?? d?.result ?? {};
 }
 
 Deno.serve(async (req) => {
@@ -161,10 +209,69 @@ Deno.serve(async (req) => {
       if (!seco) { const { error } = await sb.from("cobranca_entrega").update(patch).eq("id", m.id); if (error) throw error; }
     }
 
+    /* ---------------- 3. AVISAR O MCP DE QUE O BOLETO JA FOI ----------------
+       A automacao do GHL decide o que mandar pelo `nitron_boleto_pendentes`, que lista o que
+       ainda NAO foi enviado para aquele numero. Se a cobranca manda o link e nao marca, o
+       mesmo boleto sai de novo por lá: a mesma divida chegando por dois caminhos no mesmo dia
+       ensina o cliente a ignorar os dois.
+       SO MARCA DEPOIS DE SAIR, nunca no clique — e a regra do guia, e e o que faz sentido:
+       titulo marcado sem a mensagem ter saido desaparece das duas filas e ninguem cobra.
+       `protocolo` e o id desta linha do livro: o guia diz que chamar duas vezes com o mesmo
+       protocolo devolve `jaRegistrado` em vez de duplicar, e e isso que protege um retry. */
+    let marcados = 0, marcaFalhou = 0;
+    const paraMarcar = await (async () => {
+      if (seco) return [];
+      const { data } = await sb.from("cobranca_entrega")
+        .select("id,card_id,canal,destino,estado")
+        .in("estado", ["saiu", "entregue", "aberto"]).is("marcado_em", null)
+        .gte("criado_em", new Date(Date.now() - 7 * 86400000).toISOString())
+        .order("id").limit(40);
+      return data || [];
+    })();
+    if (paraMarcar.length) {
+      const cards = [...new Set(paraMarcar.map((x: any) => Number(x.card_id)))];
+      const porCard: Record<string, any> = {};
+      const { data: fila } = await sb.from("cobranca_fila").select("id,boleto_links").in("id", cards);
+      for (const c of (fila || [])) porCard[String(c.id)] = c;
+      const cred = await chaveMcp(sb);
+
+      for (const e of paraMarcar) {
+        const links = porCard[String(e.card_id)]?.boleto_links;
+        // card que saiu com anexo (sem link) nao tem o que marcar: quem alimenta o
+        // `pendentes` e o link. Fica marcado para nao voltar na proxima rodada.
+        if (!Array.isArray(links) || !links.length) {
+          await sb.from("cobranca_entrega").update({ marcado_em: new Date().toISOString(), marcado_erro: "card sem link: nada a marcar no MCP" }).eq("id", e.id);
+          continue;
+        }
+        if (!cred.chave) { marcaFalhou++; continue; }
+        const nufins = [...new Set(links.flatMap((l: any) => Array.isArray(l.nufins) ? l.nufins.map(Number) : []))].filter(Boolean);
+        const erros: string[] = [];
+        for (const nufin of nufins) {
+          if (Date.now() - t0 > 55000) break;
+          try {
+            await mcpTool(cred, "nitron_boleto_marcar_enviado", {
+              nufin, destino: String(e.destino || ""),
+              canal: e.canal === "email" ? "EMAIL" : "WHATSAPP",
+              protocolo: `cobranca-entrega-${e.id}`,
+              agente: "cobranca-nitron",
+            });
+          } catch (err) { erros.push(`${nufin}: ${String(err).slice(0, 80)}`); }
+        }
+        if (erros.length) {
+          marcaFalhou++;
+          await sb.from("cobranca_entrega").update({ marcado_erro: erros.join(" | ").slice(0, 300) }).eq("id", e.id);
+        } else {
+          marcados++;
+          await sb.from("cobranca_entrega").update({ marcado_em: new Date().toISOString(), marcado_erro: null }).eq("id", e.id);
+        }
+      }
+    }
+
     return j({
       ok: true, seco,
       whatsapp: { conferidas: (wpp || []).length, mudaram: wppMudou, iguais: wppIgual, sem_linha_na_fila: wppSemLinha },
       email: { perguntadas: (mails || []).length, entregues, abertos, falhas, sem_novidade: semNovidade, ghl_nao_respondeu: semResposta },
+      mcp: { marcados, falharam: marcaFalhou, olhadas: paraMarcar.length },
       ms: Date.now() - t0,
     });
   } catch (e) { return j({ ok: false, erro: detalhar(e) }, 500); }
