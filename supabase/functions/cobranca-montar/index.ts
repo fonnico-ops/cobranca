@@ -487,6 +487,27 @@ export function lotesDeLink(titulos: any[]): { documento: string; titulos: { num
   return lotes;
 }
 
+/**
+ * Reescreve o card para o caminho do LINK: texto do WhatsApp, corpo do e-mail e `boletos`
+ * vazio. Fica numa funcao so porque dois caminhos chegam aqui — o link novo, vindo do MCP, e
+ * o link guardado que foi reusado — e texto de cobranca escrito em dois lugares vira dois
+ * textos diferentes na primeira correcao que alguem fizer em um deles.
+ *
+ * `boletos: []` e a parte que cumpre o pedido do gestor: sem anexo. O cobranca-aprovar monta
+ * os anexos a partir desse campo, entao esvazia-lo aqui e o que garante que nem o WhatsApp
+ * nem o e-mail levem PDF junto do link.
+ */
+function aplicarLinks(c: any, links: any[], fase: string): void {
+  const base = { ...c._base, links };
+  const escreve = (teto: number) => fase === "vencido"
+    ? textoVencido({ ...base, teto })
+    : textoAVencer({ ...base, teto });
+  c.mensagem = escreve(TETO_WPP).replace("\n" + MARCA_BOLETOS, "").replace(MARCA_RODAPE, "");
+  c.corpo_email = html(escreve(TETO_EMAIL), [], links);
+  c.boleto_links = links;
+  c.boletos = [];
+}
+
 /* ----------------------------------------------------------------------- main */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -656,15 +677,48 @@ Deno.serve(async (req) => {
        que o anexo pede, e o motivo entra na resposta. Perder a cobranca do dia porque um
        servico de link nao respondeu seria desproporcional. */
     const linkErros: any[] = [];
+    let linkReusado = 0, linkNovo = 0, linkFaltando = 0;
     if (LINK_ON && escolhidos.length) {
       const cred = await chaveMcp(sb);
       if (!cred.chave) {
         linkErros.push({ erro: "sem NITRON_MCP_KEY nas Edge Functions nem em motor_config — os cards seguiram com anexo" });
       } else {
+        /* LINK QUE JA EXISTE NAO E PEDIDO DE NOVO.
+           Duas razoes, e as duas vieram de medir: (1) a funcao tem tempo de execucao limitado
+           e 60 grupos a uma chamada mais um segundo de espaco cada passam dele — sem reuso, o
+           montar morreria no meio e a rodada ficaria sem card nenhum; (2) a chave tem 120
+           chamadas por minuto dividida com as outras automacoes da casa.
+           O link guardado so vale se ainda nao venceu E se cobre todos os titulos que o card
+           tem AGORA: cliente que ganhou um titulo novo desde a montagem anterior precisa de
+           link novo, senao a mensagem manda ele pagar menos do que deve. */
+        const { data: guardados } = await sb.from("cobranca_fila")
+          .select("grupo,boleto_links").eq("rodada", rodada).eq("fase", fase).not("boleto_links", "is", null);
+        const linksDe = new Map<string, any[]>();
+        for (const g of (guardados || [])) {
+          const ls = (Array.isArray(g.boleto_links) ? g.boleto_links : [])
+            .filter((l: any) => l?.url && (!l.expiraEm || new Date(l.expiraEm).getTime() > Date.now()));
+          if (ls.length) linksDe.set(String(g.grupo), ls);
+        }
+        const tInicio = Date.now();
+
         for (const c of escolhidos) {
           try {
             const lotes = lotesDeLink(c._base.titulos);
             if (!lotes.length) continue;   // sem CNPJ ou sem nota: segue com anexo
+
+            // reusa o link guardado quando ele cobre todos os titulos de agora
+            const guardado = linksDe.get(String(c.grupo));
+            if (guardado) {
+              const cobertos = new Set(guardado.flatMap((l: any) => Array.isArray(l.nufins) ? l.nufins.map(Number) : []));
+              const precisa = lotes.flatMap((l: any) => l.nufins);
+              if (precisa.every((n: number) => cobertos.has(Number(n)))) {
+                aplicarLinks(c, guardado, fase);
+                linkReusado++;
+                continue;
+              }
+            }
+            // orcamento de tempo: o que nao couber fica com anexo e volta no proximo montar
+            if (Date.now() - tInicio > 80000) { linkFaltando++; continue; }
             const links: any[] = [];
             for (const lote of lotes) {
               // `ambiente: "homologacao"` faz a pagina sair com faixa vermelha "nao pague" —
@@ -677,17 +731,12 @@ Deno.serve(async (req) => {
                 nufins: lote.nufins, boletos: Array.isArray(r.boletos) ? r.boletos.length : null });
             }
             if (!links.length) continue;
-            const comLink = { ...c._base, links };
-            c.mensagem = (fase === "vencido" ? textoVencido({ ...comLink, teto: TETO_WPP }) : textoAVencer({ ...comLink, teto: TETO_WPP }))
-              .replace("\n" + MARCA_BOLETOS, "").replace(MARCA_RODAPE, "");
-            c.corpo_email = html(fase === "vencido" ? textoVencido({ ...comLink, teto: TETO_EMAIL }) : textoAVencer({ ...comLink, teto: TETO_EMAIL }), [], links);
-            c.boleto_links = links;
-            // em modo link NAO vai anexo: e o que o gestor pediu, e e o que impede o e-mail de
-            // levar PDF e link dizendo a mesma coisa duas vezes.
-            c.boletos = [];
-            // 1 segundo entre clientes: a chave tem 120 chamadas por minuto, dividida com as
-            // outras automacoes da casa.
-            await new Promise((r) => setTimeout(r, 1000));
+            aplicarLinks(c, links, fase);
+            linkNovo++;
+            // meio segundo entre clientes: a chave tem 120 chamadas por minuto, dividida com as
+            // outras automacoes da casa, e 60 grupos aqui dao ~2 chamadas por segundo no pior
+            // caso — bem abaixo do teto, e dentro do tempo que a funcao tem para rodar.
+            await new Promise((r) => setTimeout(r, 500));
           } catch (e) {
             linkErros.push({ grupo: c.grupo, nome: c.nome, erro: String(e).slice(0, 200) });
           }
@@ -756,6 +805,9 @@ Deno.serve(async (req) => {
       com_boleto: gravar.filter((c) => c.boletos.length).length,
       com_link: gravar.filter((c) => Array.isArray(c.boleto_links) && c.boleto_links.length).length,
       link_ligado: LINK_ON,
+      link_novo: linkNovo, link_reusado: linkReusado,
+      // o que nao couber no tempo desta rodada sai com anexo e ganha link no proximo montar
+      link_sem_tempo: linkFaltando || undefined,
       link_falhou: linkErros.length ? linkErros : undefined,
       sem_boleto_algum: gravar.filter((c) => c.sem_boleto > 0).length,
       com_boleto_so_no_banco: gravar.filter((c) => c.sem_boleto_no_banco > 0).length,
