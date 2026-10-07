@@ -1,4 +1,10 @@
-// cobranca-aprovar (v4) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
+// cobranca-aprovar (v5) — aprova os cards da fila e dispara. Tudo pelo GHL, pela Nina.
+//
+// v5: GRAVA UMA LINHA POR MENSAGEM em `cobranca_entrega`, e guarda o id do e-mail no GHL.
+//     Ate a v4 o que sobrava do disparo era o card ("enfileirado") e um resumo dentro de
+//     `envios` — o retrato do CLIQUE. Ninguem conseguia perguntar depois "e o e-mail daquele
+//     endereco, chegou?": o id da mensagem era descartado com o resto da resposta. Agora cada
+//     destino tem linha propria, com id, e o cobranca-entregas a mantem em dia.
 //
 // O QUE ESTA FUNCAO FAZ E NAO FAZ
 //   WhatsApp: escreve em fila_envio e para. Quem manda e o fila-processar, que ja carrega o
@@ -107,14 +113,26 @@ async function emprestar(sb: any, g: EmpGhl, contactId: string, donoAtual: strin
 }
 
 /* --------------------------------------------------------------- e-mail com anexo */
+/* GUARDA O ID DA MENSAGEM. Ate a v4 a resposta do GHL virava 300 caracteres de texto e
+   acabava ali: dava para dizer "o CRM aceitou", nunca "chegou" ou "voltou". O id do e-mail e
+   a unica chave que o endpoint de status aceita
+   (GET /conversations/messages/email/{id} -> emailMessage.status), e sem ele o cobranca-entregas
+   nao tem o que perguntar. Os dois ids sao guardados porque a resposta varia: em parte das
+   subcontas vem `emailMessageId`, em parte so `messageId`. */
 async function mandarEmail(g: EmpGhl, contactId: string, assunto: string, corpo: string, anexos: string[]) {
   const payload: any = { type: "Email", contactId, subject: assunto, html: corpo };
   // so URL http(s): o GHL busca o arquivo de fora, entao caminho relativo nao chegaria.
   const urls = anexos.map((u) => String(u || "").trim()).filter((u) => /^https?:\/\//i.test(u));
   if (urls.length) payload.attachments = urls;
   const r = await ghl(g, "POST", "/conversations/messages", payload, "2021-04-15");
-  const txt = (await r.text()).slice(0, 300);
-  return { ok: r.status >= 200 && r.status < 300, status: r.status, resposta: txt, anexos: urls.length };
+  const cru = await r.text();
+  let d: any = {}; try { d = JSON.parse(cru); } catch { /* resposta nao-JSON: o texto cru ainda vai no motivo */ }
+  return {
+    ok: r.status >= 200 && r.status < 300, status: r.status, resposta: cru.slice(0, 300), anexos: urls.length,
+    emailId: d?.emailMessageId ? String(d.emailMessageId) : null,
+    messageId: d?.messageId ? String(d.messageId) : null,
+    conversationId: d?.conversationId ? String(d.conversationId) : null,
+  };
 }
 
 /* ----------------------------------------------------------------------- main */
@@ -273,7 +291,9 @@ Deno.serve(async (req) => {
         } else {
           const r = await mandarEmail(g, ct.id, card.assunto || "Nitronplast", card.corpo_email || card.mensagem, urls);
           if (r.ok && !conversa) conversa = { contact_id: ct.id, canal: "email", destino: alvoMail.valor };
-          envios.push({ canal: "email", destino: alvoMail.valor, origem: alvoMail.origem, ok: r.ok, anexos: r.anexos, motivo: r.ok ? undefined : `GHL ${r.status}: ${r.resposta}`, em: new Date().toISOString() });
+          envios.push({ canal: "email", destino: alvoMail.valor, origem: alvoMail.origem, ok: r.ok, anexos: r.anexos,
+            ghl_email_id: r.emailId, ghl_message_id: r.messageId, conversation_id: r.conversationId,
+            motivo: r.ok ? undefined : `GHL ${r.status}: ${r.resposta}`, em: new Date().toISOString() });
         }
       }
 
@@ -313,6 +333,33 @@ Deno.serve(async (req) => {
         aprovado_por: aprovadoPor, aprovado_em: new Date().toISOString(),
         fila_ids: filaIds, envios,
       }).eq("id", card.id);
+
+      /* ---- O LIVRO DE ENTREGAS: uma linha por mensagem -------------------------------
+         O card diz "aprovado"; o livro diz o que aconteceu com CADA mensagem, por destino.
+         Sem ele a tela nao consegue responder "o WhatsApp deste numero saiu?" — e em 25/09
+         foi essa a pergunta sem resposta: 59 cards iguais na tela, 28 WhatsApp na rua, 24
+         parados pela queda do numero.
+         O estado nasce do que sabemos AGORA: WhatsApp escrito na fila nasce `na_fila` (quem o
+         move para `saiu` e o cobranca-entregas, lendo o fila_envio), e o e-mail nasce `saiu`
+         porque o POST ja foi. `upsert` porque um card reaprovado deve reescrever a propria
+         linha em vez de criar uma segunda entrega para o mesmo destino.
+         Falhar aqui NAO pode derrubar o disparo: a mensagem ja saiu, e perder o registro dela
+         e menos grave do que devolver erro para quem clicou. Por isso so anota. */
+      const registro = envios.map((e: any) => ({
+        card_id: card.id, rodada: card.rodada, fase: card.fase, grupo: card.grupo, nome: card.nome,
+        canal: e.canal, destino: String(e.destino || ""), origem: e.origem ?? null,
+        fila_id: e.fila_id ?? null,
+        ghl_email_id: e.ghl_email_id ?? null, ghl_message_id: e.ghl_message_id ?? null, conversation_id: e.conversation_id ?? null,
+        estado: !e.ok ? "erro" : (e.canal === "email" ? "saiu" : "na_fila"),
+        detalhe: e.ok ? null : String(e.motivo || "sem motivo").slice(0, 300),
+        anexos: Number(e.anexos || 0),
+        criado_em: e.em, saiu_em: (e.ok && e.canal === "email") ? e.em : null,
+        confirmado_em: null, checado_em: null,
+      })).filter((x: any) => x.destino);
+      if (registro.length) {
+        const { error: eL } = await sb.from("cobranca_entrega").upsert(registro, { onConflict: "card_id,canal,destino" });
+        if (eL) console.error("cobranca_entrega nao registrou o card " + card.id + ": " + detalhar(eL));
+      }
 
       resumo.push({ id: card.id, nome: card.nome, valor: card.valor, resultado: algumOk ? "enfileirado" : "erro", envios });
     }

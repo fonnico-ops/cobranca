@@ -15,3 +15,5 @@ testes/boleto_sem_pix.pdf
 testes/painel_puro.*
 testes/titulos-refresh_puro.*
 testes/refresh_puro.mjs
+testes/entregas_puro.*
+testes/vigia_puro.mjs

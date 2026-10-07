@@ -1,4 +1,4 @@
-// cobranca-painel (v7) — a tela de aprovacao, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v9) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -43,7 +43,18 @@
 //     sem dizer que ha mais grupos esperando a vez. Agora o rodape traz a previa, com o
 //     total e em quantas rodadas a carteira e coberta no ritmo atual.
 //
+// v9: ENTREGA POR MENSAGEM, e nao por card. Um card sao duas mensagens (WhatsApp e e-mail),
+//     com destinos diferentes — e o selo por canal da v8 escondia justo o que interessa: em
+//     25/09, 59 cards "enfileirados" iguais na tela enquanto 28 WhatsApp sairam, o numero caiu
+//     as 13:56 e 24 mensagens ficaram paradas sem dizer QUAIS. Agora:
+//       - cada card lista suas mensagens, com destino, estado e horario;
+//       - `?aba=entregas` e o extrato completo: as presas no topo, com quanto tempo esperam;
+//       - a palavra mudou. A v8 escrevia "WhatsApp entregue"; ninguem nos devolve confirmacao
+//         de entrega do WhatsApp, entao agora e "saiu". `entregue`/`aberto` so no e-mail, e so
+//         quando o GHL confirma — o cobranca-entregas pergunta pelo id que o aprovar v5 grava.
+//
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
+// GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
 // GET  ?aba=conversas | ?aba=saude&dias=30
 // POST { acao:"aprovar"|"recusar", ids:[...] } -> repassa ao cobranca-aprovar
 //
@@ -74,36 +85,83 @@ const ORIGEM_COR: Record<string, string> = {
   sankhya_contato: "#c80", parceiro_sankhya: "#c80", crm: "#888",
 };
 
-/**
- * O que ACONTECEU com um card que ja foi aprovado.
+/* ===================================================== O ESTADO DE CADA MENSAGEM
  *
- * Aprovar nao e entregar. O e-mail sai na hora, mas o WhatsApp e escrito na fila e sai
- * espacado — e ate ontem a tela dizia so "enfileirado", que e a informacao do momento do
- * clique e nao a de agora. Quem aprovou 60 grupos ficava sem saber quantos chegaram,
- * quantos ainda estao na fila e quantos deram erro, que e exatamente a pergunta seguinte.
+ * Aprovar nao e entregar, e um card nao e uma mensagem: sao duas (WhatsApp e e-mail), com
+ * destinos diferentes e destinos finais diferentes. Ate a v8 a tela dava um selo por canal
+ * lido de `cobranca_fila.envios` — o retrato do CLIQUE — e em 25/09 isso escondeu o que
+ * importava: 59 cards "enfileirados" iguais na tela, 28 WhatsApp na rua, o numero caiu as
+ * 13:56 e 24 mensagens ficaram paradas sem que a tela dissesse QUAIS.
  *
- * A verdade esta em fila_envio: `status` e `enviado_em` por linha. O card guarda os ids em
- * `fila_ids` (WhatsApp) e o resultado do e-mail em `envios`.
+ * Agora a fonte e o livro `cobranca_entrega`: uma linha por mensagem, com destino, horario e
+ * estado proprios. Para o WhatsApp o livro e conferido contra a linha ATUAL do fila_envio
+ * (que o painel ja carrega): o cron do cobranca-entregas roda de 10 em 10 minutos, e entre
+ * duas rodadas dele a tela nao pode mentir.
+ *
+ * PALAVRA CERTA, DE PROPOSITO: `saiu` nao e `entregue`.
+ *   Ninguem nos devolve "chegou no aparelho" do WhatsApp — o campanhas-enviar so consegue
+ *   provar o contrario (a linha do ZaptosWPP dizendo que a instancia caiu). Escrever
+ *   "entregue" ali, como a v8 fazia, e afirmar o que nao sabemos; quem cobra usa essa tela
+ *   para falar com o cliente, e "consta entregue" errado custa a conversa.
+ *   `entregue` e `aberto` existem so no e-mail, e so quando o GHL confirma.
  */
-function entrega(c: any, entregas: Record<string, any>): string {
-  if (c.status === "aguardando") return "";
-  const envios: any[] = Array.isArray(c.envios) ? c.envios : [];
-  const selo = (txt: string, cor: string) => `<span class="selo" style="background:${cor}">${esc(txt)}</span>`;
-  const linhas: string[] = [];
+export const ESTADO: Record<string, { txt: string; cor: string }> = {
+  na_fila:  { txt: "na fila",  cor: "#c60" },
+  saiu:     { txt: "saiu",     cor: "#0a7" },
+  entregue: { txt: "entregue", cor: "#087" },
+  aberto:   { txt: "aberto",   cor: "#06c" },
+  erro:     { txt: "erro",     cor: "#c0392b" },
+};
 
-  for (const e of envios) {
-    if (e.canal === "email") {
-      linhas.push(e.ok ? selo("e-mail enviado", "#0a7") : selo("e-mail falhou: " + String(e.motivo || "").slice(0, 60), "#c0392b"));
-      continue;
-    }
-    // WhatsApp: o que vale e o estado ATUAL da linha na fila, nao o do momento do clique
-    const f = entregas[String(e.fila_id)];
-    if (!f) { linhas.push(e.ok ? selo("WhatsApp na fila", "#c60") : selo("WhatsApp falhou: " + String(e.motivo || "").slice(0, 60), "#c0392b")); continue; }
-    if (f.status === "enviado") linhas.push(selo("WhatsApp entregue " + hhmm(f.enviado_em), "#0a7"));
-    else if (f.status === "erro") linhas.push(selo("WhatsApp erro: " + String(f.resultado || "").slice(0, 70), "#c0392b"));
-    else linhas.push(selo("WhatsApp na fila desde " + hhmm(f.criado_em), "#c60"));
+/** Traducao do fila_envio para o vocabulario do livro (a mesma do cobranca-entregas). */
+export function doFila(status: string): "na_fila" | "saiu" | "erro" {
+  if (status === "enviado") return "saiu";
+  if (status === "erro") return "erro";
+  return "na_fila";
+}
+
+/**
+ * O estado de AGORA de uma entrega, e a frase curta que a explica.
+ *
+ * `fila` e o mapa id -> linha do fila_envio. Quando a linha existe ela ganha do livro: e a
+ * fonte, e o livro e so a copia que o cron atualiza.
+ */
+export function estadoDaEntrega(e: any, fila: Record<string, any>): { estado: string; quando: string; nota: string } {
+  const f = e.canal === "whatsapp" && e.fila_id ? fila[String(e.fila_id)] : null;
+  if (f) {
+    const estado = doFila(String(f.status || ""));
+    if (estado === "erro") return { estado, quando: hhmm(f.enviado_em), nota: String(f.resultado || f.erro || e.detalhe || "").slice(0, 160) };
+    if (estado === "saiu") return { estado, quando: hhmm(f.enviado_em), nota: "" };
+    return { estado, quando: hhmm(f.criado_em), nota: "esperando a vez na fila" };
   }
-  return linhas.length ? `<div class="entrega">${linhas.join("")}</div>` : "";
+  const estado = String(e.estado || "na_fila");
+  if (estado === "erro") return { estado, quando: hhmm(e.criado_em), nota: String(e.detalhe || "").slice(0, 160) };
+  if (estado === "entregue" || estado === "aberto") return { estado, quando: hhmm(e.confirmado_em || e.saiu_em), nota: "" };
+  if (estado === "saiu" && e.canal === "email") {
+    // e-mail sem id no CRM nunca sera confirmado; dizer isso e melhor do que deixar em branco
+    const temId = !!(e.ghl_email_id || e.ghl_message_id);
+    return { estado, quando: hhmm(e.saiu_em || e.criado_em), nota: temId ? "sem confirmação do provedor ainda" : "sem confirmação: o CRM não devolveu id da mensagem" };
+  }
+  return { estado, quando: hhmm(e.saiu_em || e.criado_em), nota: "" };
+}
+
+const CANAL_ROTULO: Record<string, string> = { whatsapp: "WhatsApp", email: "E-mail" };
+
+/** As entregas de um card, uma linha por mensagem. */
+function entrega(c: any, porCard: Record<string, any[]>, fila: Record<string, any>): string {
+  if (c.status === "aguardando") return "";
+  const rows = porCard[String(c.id)] || [];
+  if (!rows.length) return "";
+  const linhas = rows.map((e: any) => {
+    const { estado, quando, nota } = estadoDaEntrega(e, fila);
+    const cor = (ESTADO[estado] || ESTADO.na_fila).cor;
+    const txt = (ESTADO[estado] || { txt: estado }).txt;
+    return `<div class="ent">
+      <span class="selo" style="background:${cor}">${esc(txt)}${quando ? " " + esc(quando) : ""}</span>
+      <b>${esc(CANAL_ROTULO[e.canal] || e.canal)}</b> <span class="para">${esc(e.destino)}</span>
+      ${nota ? `<span class="quem">${esc(nota)}</span>` : ""}</div>`;
+  }).join("");
+  return `<div class="entrega">${linhas}</div>`;
 }
 const hhmm = (t: any) => t ? new Date(t).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }) : "";
 
@@ -180,7 +238,7 @@ function pagina(cards: any[], ctx: any): string {
       </div>
       ${destino(wpp, "WhatsApp")}${destino(mail, "E-mail")}
       <pre class="msg">${esc(c.mensagem)}</pre>
-      ${entrega(c, ctx.entregas)}
+      ${entrega(c, ctx.porCard, ctx.fila)}
       ${c.status !== "aguardando" ? `<div class="jasaiu">${esc(c.status)}${c.motivo ? " — " + esc(c.motivo) : ""}</div>` : ""}
     </article>`;
   }).join("");
@@ -213,8 +271,11 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .jasaiu{margin-top:8px;font-size:12.5px;color:var(--mut)}
 #aviso{padding:10px 12px;border-radius:8px;margin:10px 0;display:none}
 .ritmo{font-size:13px;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 11px;margin:0 0 12px}
-.entrega{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
-.selo{font-size:11.5px;color:#fff;padding:2px 9px;border-radius:99px}
+.entrega{margin-top:10px;border-top:1px solid var(--bd);padding-top:8px}
+.ent{display:flex;gap:7px;align-items:baseline;flex-wrap:wrap;font-size:12.5px;margin:3px 0}
+.ent b{color:var(--mut);font-weight:600}
+.ent .para{overflow-wrap:anywhere}
+.selo{font-size:11.5px;color:#fff;padding:2px 9px;border-radius:99px;white-space:nowrap}
 .depois{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:18px 0}
 .depois h2{font-size:15px;margin:0 0 6px}
 .depois .nota{color:var(--mut);font-size:12.5px;margin:6px 0}
@@ -237,6 +298,7 @@ ${ctx.wppPausado
 <div class="barra">
   <button id="todos">Marcar todos</button><button id="nenhum">Desmarcar</button>
   <span style="flex:1"></span>
+  <a href="?aba=entregas${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Entregas &rarr;</a>
   <a href="?aba=conversas${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Conversas da Nina &rarr;</a>
   <a href="?aba=saude${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Saúde &rarr;</a>
   <button id="recusar">Recusar</button>
@@ -680,6 +742,123 @@ async function previaProximos(sb: any, cfg: any, cards: any[], fase: string) {
   };
 }
 
+/* ================================================================= a aba das entregas
+ *
+ * A pergunta que ela responde e no singular: "esta mensagem, para este numero, saiu?".
+ * Uma linha por mensagem, a mais recente em cima, com o horario e o motivo quando falhou.
+ *
+ * Duas coisas que ela faz de proposito:
+ *   1. SEPARA O QUE ESTA PRESO. Mensagem em `na fila` ha horas nao e igual a mensagem que
+ *      acabou de entrar: e sinal de numero fora do ar, e e a primeira coisa que quem cobra
+ *      precisa ver. Por isso ela sobe para o topo, com quanto tempo faz.
+ *   2. NAO CHAMA `saiu` DE `entregue`. A coluna diz o que o sistema sabe, e a nota de rodape
+ *      explica a diferenca — sem isso a tela viraria promessa de entrega que ninguem nos deu.
+ */
+async function dadosEntregas(sb: any, opts: { dias: number; rodada: string | null }) {
+  const base = () => {
+    let q = sb.from("cobranca_entrega").select("*");
+    if (opts.rodada) q = q.eq("rodada", opts.rodada);
+    else q = q.gte("criado_em", new Date(Date.now() - opts.dias * 864e5).toISOString());
+    return q;
+  };
+  const rows = await todas((de, ate) => base().order("criado_em", { ascending: false }).range(de, ate), 3000);
+
+  // o estado do WhatsApp vem da linha da fila, sempre — o livro pode estar a 10 minutos atras
+  const ids = [...new Set(rows.filter((r: any) => r.canal === "whatsapp" && r.fila_id).map((r: any) => Number(r.fila_id)))];
+  const fila: Record<string, any> = {};
+  for (let i = 0; i < ids.length; i += 500) {
+    const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado,erro").in("id", ids.slice(i, i + 500));
+    for (const f of (data || [])) fila[String(f.id)] = f;
+  }
+
+  const itens = rows.map((r: any) => ({ ...r, agora: estadoDaEntrega(r, fila) }));
+  const conta = (canal: string, estado: string) => itens.filter((x: any) => x.canal === canal && x.agora.estado === estado).length;
+  const resumo = ["whatsapp", "email"].map((canal) => ({
+    canal, total: itens.filter((x: any) => x.canal === canal).length,
+    na_fila: conta(canal, "na_fila"), saiu: conta(canal, "saiu"),
+    entregue: conta(canal, "entregue"), aberto: conta(canal, "aberto"), erro: conta(canal, "erro"),
+  }));
+  const presas = itens.filter((x: any) => x.agora.estado === "na_fila")
+    .sort((a: any, b: any) => new Date(a.criado_em).getTime() - new Date(b.criado_em).getTime());
+  const checado = rows.map((r: any) => r.checado_em).filter(Boolean).sort().at(-1) || null;
+  return { itens, resumo, presas, checado, rodada: opts.rodada, dias: opts.dias };
+}
+
+function paginaEntregas(d: any, ctx: any): string {
+  const linha = (e: any) => {
+    const { estado, quando, nota } = e.agora;
+    const cor = (ESTADO[estado] || ESTADO.na_fila).cor;
+    return `<tr>
+      <td class="num">${esc(qdo(e.criado_em))}</td>
+      <td>${esc(e.nome || "grupo " + e.grupo)}</td>
+      <td>${esc(CANAL_ROTULO[e.canal] || e.canal)}</td>
+      <td>${esc(e.destino)}</td>
+      <td><span class="selo" style="background:${cor}">${esc((ESTADO[estado] || { txt: estado }).txt)}${quando ? " " + esc(quando) : ""}</span></td>
+      <td class="mut">${esc(nota || "")}</td></tr>`;
+  };
+  const tabela = (lista: any[]) => `<table><tr><th>aprovada</th><th>cliente</th><th>canal</th><th>destino</th><th>estado</th><th>o que se sabe</th></tr>
+    ${lista.map(linha).join("")}</table>`;
+  const kpi = (r: any) => `<div class="kpi"><b>${r.total}</b><span>${esc(CANAL_ROTULO[r.canal] || r.canal)}</span>
+    <span class="mut">${[r.aberto ? r.aberto + " aberto" : "", r.entregue ? r.entregue + " entregue" : "", r.saiu ? r.saiu + " saiu" : "",
+      r.na_fila ? r.na_fila + " na fila" : "", r.erro ? r.erro + " com erro" : ""].filter(Boolean).join(" · ") || "nenhuma mensagem"}</span></div>`;
+  const faz = (t: any) => {
+    const h = Math.floor((Date.now() - new Date(t).getTime()) / 3600000);
+    const m = Math.round((Date.now() - new Date(t).getTime()) / 60000);
+    return h >= 1 ? `${h}h` : `${Math.max(1, m)} min`;
+  };
+
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cobrança — entregas</title><style>
+:root{--bg:#f6f7f9;--fg:#111;--card:#fff;--bd:#e3e5e9;--mut:#666;--ac:#0b5}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#14161a;--fg:#e9eaec;--card:#1c1f24;--bd:#2a2e35;--mut:#9aa0a8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 2px}h2{font-size:15px;margin:0 0 8px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:14px}
+section{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:12px 0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd);overflow-wrap:anywhere;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px}
+td.num{white-space:nowrap}
+.mut{color:var(--mut);font-size:12.5px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.kpi{background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:10px 12px}
+.kpi b{display:block;font:700 22px system-ui}.kpi span{display:block;color:var(--mut);font-size:12.5px}
+.selo{font-size:11.5px;color:#fff;padding:2px 9px;border-radius:99px;white-space:nowrap;display:inline-block}
+.alerta{font-size:13.5px;background:#fff4e5;color:#7a3e00;border:1px solid #f0c78a;border-radius:8px;padding:10px 12px;margin:0 0 12px}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]) .alerta{background:#3a2a12;color:#f0c78a;border-color:#6b4a1f}}
+a.volta{color:var(--ac);text-decoration:none;font-size:13px}
+.nada{color:var(--mut);font-size:13.5px;margin:0}
+</style></head><body><div class="wrap">
+<h1>Cobrança — entregas, uma por mensagem</h1>
+<div class="sub">${d.rodada ? "rodada " + esc(d.rodada) : "últimos " + d.dias + " dia(s)"} · ${d.itens.length} mensagem(ns)
+  · conferido pela última vez ${d.checado ? esc(qdo(d.checado)) : "nunca — o <code>cobranca-entregas</code> ainda não rodou"}<br>
+<a class="volta" href="?fase=vencido${ctx.sufixo}">&larr; aprovação</a> ·
+<a class="volta" href="?aba=entregas&dias=7${ctx.sufixo}">7 dias</a> ·
+<a class="volta" href="?aba=entregas&dias=30${ctx.sufixo}">30 dias</a> ·
+<a class="volta" href="?aba=conversas${ctx.sufixo}">conversas</a> ·
+<a class="volta" href="?aba=saude${ctx.sufixo}">saúde</a></div>
+
+${ctx.wppPausado ? `<div class="alerta">O WhatsApp da cobrança está fora do ar desde ${esc(ctx.pausadaDesde)} —
+  as mensagens em <b>na fila</b> só saem quando ele voltar. O e-mail não depende dele e continua saindo.</div>` : ""}
+
+<section><h2>Como está</h2><div class="cards">${d.resumo.map(kpi).join("")}</div>
+<p class="nada" style="margin-top:10px"><b>saiu</b> = o CRM despachou a mensagem. Não é confirmação de entrega:
+  no WhatsApp ninguém nos devolve “chegou no aparelho”. <b>entregue</b> e <b>aberto</b> existem só no e-mail,
+  e só quando o provedor confirma.</p></section>
+
+${d.presas.length ? `<section><h2>Presas na fila agora (${d.presas.length})</h2>
+${tabela(d.presas.slice(0, 60))}
+<p class="nada" style="margin-top:8px">A mais antiga espera há ${esc(faz(d.presas[0].criado_em))}.
+  O WhatsApp sai espaçado de propósito; espera de horas quer dizer número fora do ar.</p></section>` : ""}
+
+<section><h2>Todas as mensagens</h2>
+${d.itens.length ? tabela(d.itens.slice(0, 400)) : '<p class="nada">Nenhuma mensagem no período.</p>'}
+${d.itens.length > 400 ? `<p class="nada" style="margin-top:8px">… e mais ${d.itens.length - 400}. Filtre por rodada para ver o resto.</p>` : ""}</section>
+</div></body></html>`;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
@@ -725,6 +904,17 @@ Deno.serve(async (req) => {
       });
     }
 
+    if (u.searchParams.get("aba") === "entregas") {
+      const dias = Math.max(1, Math.min(365, Number(u.searchParams.get("dias")) || 2));
+      const soRodada = u.searchParams.get("rodada");
+      const { data: inst } = await sb.from("instancia_ghl").select("pausada_em").eq("instancia", cfg?.instancia || "Nina").maybeSingle();
+      const d = await dadosEntregas(sb, { dias, rodada: soRodada ? soRodada.slice(0, 10) : null });
+      return new Response(paginaEntregas(d, {
+        sufixo, wppPausado: !!inst?.pausada_em,
+        pausadaDesde: inst?.pausada_em ? qdo(inst.pausada_em) : "",
+      }), { headers: { ...cors, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+
     if (u.searchParams.get("aba") === "conversas") {
       // ordem por status e nao por data: o que precisa de olho humano (repassada, promessa)
       // sobe, e a lista de quem so esta na cadencia desce.
@@ -748,15 +938,40 @@ Deno.serve(async (req) => {
       sb.from("fila_config").select("wpp_intervalo_seg").eq("id", 1).maybeSingle(),
     ]);
 
-    /* ---- o que ACONTECEU com o que ja foi aprovado ------------------------------------
-       O card guarda o id da linha da fila; o estado de verdade (entregue, na fila, erro)
-       muda depois, na fila_envio. Sem esta leitura a tela congela no "enfileirado" do
-       momento do clique, que e a informacao menos util depois que o disparo comeca. */
-    const ids = (cards || []).flatMap((c: any) => Array.isArray(c.fila_ids) ? c.fila_ids.map(Number) : []).filter(Boolean);
-    const entregas: Record<string, any> = {};
+    /* ---- o que ACONTECEU com CADA mensagem do que ja foi aprovado ---------------------
+       Duas leituras, e as duas precisam existir:
+         `cobranca_entrega` da a lista de mensagens (uma por destino, com o id do e-mail no
+         CRM e o que o provedor confirmou);
+         `fila_envio` da o estado de AGORA do WhatsApp — o livro e atualizado por cron de 10
+         em 10 minutos, e entre duas rodadas a tela nao pode congelar no estado antigo.
+       Card antigo, de antes do livro, cai no plano B: as mensagens sao remontadas a partir de
+       `envios`, que e o retrato do clique. Melhor um retrato velho do que uma tela em branco. */
+    const cardIds = (cards || []).map((c: any) => Number(c.id));
+    const doLivro: any[] = [];
+    for (let i = 0; i < cardIds.length; i += 300) {
+      const { data } = await sb.from("cobranca_entrega").select("*").in("card_id", cardIds.slice(i, i + 300));
+      doLivro.push(...(data || []));
+    }
+    const porCard: Record<string, any[]> = {};
+    for (const e of doLivro) (porCard[String(e.card_id)] = porCard[String(e.card_id)] || []).push(e);
+    for (const c of (cards || [])) {
+      if (porCard[String(c.id)] || c.status === "aguardando") continue;
+      const envios: any[] = Array.isArray(c.envios) ? c.envios : [];
+      if (!envios.length) continue;
+      porCard[String(c.id)] = envios.filter((e: any) => e.destino).map((e: any) => ({
+        card_id: c.id, canal: e.canal, destino: e.destino, fila_id: e.fila_id ?? null,
+        estado: !e.ok ? "erro" : (e.canal === "email" ? "saiu" : "na_fila"),
+        detalhe: e.ok ? null : e.motivo, criado_em: e.em, saiu_em: e.canal === "email" && e.ok ? e.em : null,
+      }));
+    }
+
+    const ids = doLivro.filter((e: any) => e.canal === "whatsapp" && e.fila_id).map((e: any) => Number(e.fila_id))
+      .concat((cards || []).flatMap((c: any) => Array.isArray(c.fila_ids) ? c.fila_ids.map(Number) : []))
+      .filter(Boolean);
+    const fila: Record<string, any> = {};
     for (let i = 0; i < ids.length; i += 500) {
-      const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado").in("id", ids.slice(i, i + 500));
-      for (const f of (data || [])) entregas[String(f.id)] = f;
+      const { data } = await sb.from("fila_envio").select("id,status,enviado_em,criado_em,resultado,erro").in("id", ids.slice(i, i + 500));
+      for (const f of (data || [])) fila[String(f.id)] = f;
     }
 
     /* ---- o que vem DEPOIS desta rodada (previa) ---------------------------------------
@@ -770,7 +985,7 @@ Deno.serve(async (req) => {
 
     return new Response(pagina(cards || [], {
       rodada, fase, instancia: cfg?.instancia || "Nina", desligado: cfg?.ativo !== true, sufixo,
-      wppPausado: !!pausadaEm, segPorMsg, entregas, proximos,
+      wppPausado: !!pausadaEm, segPorMsg, porCard, fila, proximos,
       pausadaDesde: pausadaEm ? new Date(pausadaEm).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "",
       // com a query inteira: e por ela que a chave chega ao POST
       api: Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-painel" + u.search,
