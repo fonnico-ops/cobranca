@@ -1,4 +1,4 @@
-// cobranca-entregas (v2) — CONFERE, MENSAGEM POR MENSAGEM, O QUE ACONTECEU DEPOIS DO DISPARO.
+// cobranca-entregas (v3) — CONFERE, MENSAGEM POR MENSAGEM, O QUE ACONTECEU DEPOIS DO DISPARO.
 //
 // O painel sabia responder "o card foi aprovado?". Quem cobra pergunta outra coisa: "a mensagem
 // para ESTE numero saiu? o e-mail para ESTE endereco chegou?". Um card sao duas mensagens, com
@@ -26,6 +26,13 @@
 // acabou de ser perguntada nao e perguntada de novo no minuto seguinte. O cron roda de 10 em 10
 // minutos; uma rodada que nao terminou continua na proxima, na ordem do mais antigo sem check.
 //
+// v3 (08/10): A MARCACAO NO MCP GANHOU FIM. A v2 so gravava `marcado_erro` quando a marcacao
+//   falhava e deixava `marcado_em` nulo, entao a linha voltava a cada 10 minutos e rechamava os
+//   MESMOS nufins. Com um erro permanente do servico do ERP, a linha 102 (12 nufins) fez 1.881
+//   chamadas em 144 rodadas. Nenhuma mensagem foi para cliente nenhum — marcar nao e enviar — e
+//   e por isso que ninguem perceberia: o estrago era so no log do MCP. Agora ha teto de
+//   tentativas e memoria por nufin (ver `vereditoDaMarcacao` e o bloco 3).
+//
 // GET/POST { teto?: 120, dias?: 3, seco?: true }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -34,6 +41,32 @@ const j = (o: unknown, s = 200) => new Response(JSON.stringify(o), { status: s, 
 const srvKey = () => Deno.env.get("SRV_JWT") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const detalhar = (e: any) => [e?.message, e?.details, e?.hint, e?.code].filter(Boolean).join(" · ") || String(e);
 const API = "https://services.leadconnectorhq.com";
+
+/**
+ * O QUE FAZER COM UMA LINHA DEPOIS DE TENTAR MARCA-LA NO MCP.
+ *
+ * Isto e funcao pura porque o laco que ela governa ja se perdeu uma vez: em 07/10 uma linha
+ * com erro permanente do ERP voltou 144 vezes e rechamou os mesmos 12 nufins, 1.881 vezes ao
+ * todo. A regra que faltava cabe em tres linhas, e agora o teste a prende:
+ *   - deu tudo certo        -> fecha (`marcado_em`), nunca mais volta;
+ *   - so faltou tempo       -> nao conta fracasso, volta e continua de onde parou;
+ *   - erro, dentro do teto  -> conta a tentativa e volta;
+ *   - erro, no teto         -> FECHA mesmo assim, com o motivo escrito. Linha fechada com
+ *                              defeito e visivel; linha eterna e so ruido no log do MCP.
+ */
+export function vereditoDaMarcacao(
+  o: { tentativas: number; teto: number; erros: string[]; sobrouTempo: boolean },
+): { fecha: boolean; desistiu: boolean; tentativas: number; erro: string | null } {
+  if (!o.erros.length) {
+    return { fecha: o.sobrouTempo, desistiu: false, tentativas: o.tentativas, erro: null };
+  }
+  const tentativas = Number(o.tentativas || 0) + 1;
+  const desistiu = tentativas >= o.teto;
+  return {
+    fecha: desistiu, desistiu, tentativas,
+    erro: (desistiu ? `desistiu apos ${tentativas} tentativas — ` : `tentativa ${tentativas}/${o.teto} — `) + o.erros.join(" | "),
+  };
+}
 
 /** O estado do WhatsApp, traduzido do fila_envio para o vocabulario do livro. */
 export function doFila(status: string): "na_fila" | "saiu" | "erro" {
@@ -218,12 +251,25 @@ Deno.serve(async (req) => {
        titulo marcado sem a mensagem ter saido desaparece das duas filas e ninguem cobra.
        `protocolo` e o id desta linha do livro: o guia diz que chamar duas vezes com o mesmo
        protocolo devolve `jaRegistrado` em vez de duplicar, e e isso que protege um retry. */
-    let marcados = 0, marcaFalhou = 0;
+    /* O RETRY TEM TETO E TEM MEMORIA — e os dois nasceram de um estrago.
+       Em 07/10 as 16:20 a linha 102 (card 684, 12 nufins) comecou a falhar com erro do
+       servico do ERP por tras do MCP. A versao anterior so gravava `marcado_erro` e deixava
+       `marcado_em` nulo, entao a MESMA linha voltava a cada 10 minutos e rechamava os MESMOS
+       12 nufins: 144 rodadas, 1.881 chamadas pela mesma divida, sem nenhum caminho para parar
+       — nem quando o erro era permanente, nem quando 11 dos 12 nufins ja tinham sido aceitos.
+       Nada disso virou mensagem para cliente (marcar nao e enviar), mas um laco que so para
+       quando alguem percebe nao e um laco: e uma bomba-relogio silenciosa.
+         `marcado_tentativas` < TETO  -> a linha sai da fila sozinha depois de TETO fracassos,
+                                          fechada com o motivo, para a TI achar depois;
+         `marcado_nufins`             -> nufin ja aceito nao e rechamado no retry. */
+    const TETO_MARCA = 5;
+    let marcados = 0, marcaFalhou = 0, marcaDesistiu = 0;
     const paraMarcar = await (async () => {
       if (seco) return [];
       const { data } = await sb.from("cobranca_entrega")
-        .select("id,card_id,canal,destino,estado")
+        .select("id,card_id,canal,destino,estado,marcado_tentativas,marcado_nufins")
         .in("estado", ["saiu", "entregue", "aberto"]).is("marcado_em", null)
+        .lt("marcado_tentativas", TETO_MARCA)
         .gte("criado_em", new Date(Date.now() - 7 * 86400000).toISOString())
         .order("id").limit(40);
       return data || [];
@@ -245,9 +291,15 @@ Deno.serve(async (req) => {
         }
         if (!cred.chave) { marcaFalhou++; continue; }
         const nufins = [...new Set(links.flatMap((l: any) => Array.isArray(l.nufins) ? l.nufins.map(Number) : []))].filter(Boolean);
+        // o que o MCP ja aceitou em rodadas anteriores nao volta para a linha de frente
+        const feitos = new Set((Array.isArray(e.marcado_nufins) ? e.marcado_nufins : []).map(Number));
+        const faltam = nufins.filter((n: number) => !feitos.has(n));
         const erros: string[] = [];
-        for (const nufin of nufins) {
-          if (Date.now() - t0 > 55000) break;
+        let sobrouTempo = true;
+        for (const nufin of faltam) {
+          // sem tempo para terminar: salva o avanco e volta na proxima rodada SEM contar
+          // fracasso — ficar sem minuto nao e o MCP ter recusado nada.
+          if (Date.now() - t0 > 55000) { sobrouTempo = false; break; }
           try {
             await mcpTool(cred, "nitron_boleto_marcar_enviado", {
               nufin, destino: String(e.destino || ""),
@@ -255,15 +307,21 @@ Deno.serve(async (req) => {
               protocolo: `cobranca-entrega-${e.id}`,
               agente: "cobranca-nitron",
             });
+            feitos.add(Number(nufin));
           } catch (err) { erros.push(`${nufin}: ${String(err).slice(0, 80)}`); }
         }
-        if (erros.length) {
-          marcaFalhou++;
-          await sb.from("cobranca_entrega").update({ marcado_erro: erros.join(" | ").slice(0, 300) }).eq("id", e.id);
-        } else {
-          marcados++;
-          await sb.from("cobranca_entrega").update({ marcado_em: new Date().toISOString(), marcado_erro: null }).eq("id", e.id);
-        }
+        const v = vereditoDaMarcacao({
+          tentativas: Number(e.marcado_tentativas || 0), teto: TETO_MARCA, erros, sobrouTempo,
+        });
+        if (v.desistiu) marcaDesistiu++;
+        else if (erros.length) marcaFalhou++;
+        else if (v.fecha) marcados++;
+        await sb.from("cobranca_entrega").update({
+          marcado_nufins: [...feitos],
+          marcado_tentativas: v.tentativas,
+          ...(v.fecha ? { marcado_em: new Date().toISOString() } : {}),
+          marcado_erro: v.erro,
+        }).eq("id", e.id);
       }
     }
 
@@ -271,7 +329,7 @@ Deno.serve(async (req) => {
       ok: true, seco,
       whatsapp: { conferidas: (wpp || []).length, mudaram: wppMudou, iguais: wppIgual, sem_linha_na_fila: wppSemLinha },
       email: { perguntadas: (mails || []).length, entregues, abertos, falhas, sem_novidade: semNovidade, ghl_nao_respondeu: semResposta },
-      mcp: { marcados, falharam: marcaFalhou, olhadas: paraMarcar.length },
+      mcp: { marcados, falharam: marcaFalhou, desistiu: marcaDesistiu, olhadas: paraMarcar.length },
       ms: Date.now() - t0,
     });
   } catch (e) { return j({ ok: false, erro: detalhar(e) }, 500); }

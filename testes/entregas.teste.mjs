@@ -14,7 +14,14 @@
 //      24 mensagens presas pela queda do numero apareceriam como "na fila" mesmo depois de
 //      sairem, e as que falharam apareceriam como se estivessem esperando.
 import { doFila, estadoDaEntrega, ESTADO } from "./painel_puro.mjs";
-import { doGhl } from "./entregas_puro.mjs";
+//
+//   3. UM RETRY QUE NAO TERMINA. Em 07/10 as 16:20 uma linha comecou a falhar na marcacao do
+//      MCP com erro do servico do ERP. Como o codigo so gravava o erro e deixava a linha em
+//      aberto, ela voltou a cada 10 minutos e rechamou os MESMOS 12 nufins: 144 rodadas,
+//      1.881 chamadas pela mesma divida, ate alguem olhar o log. Nenhum cliente recebeu nada
+//      (marcar nao e enviar), e e justamente por isso que ninguem perceberia sozinho. O bloco
+//      5 prende as tres regras que faltavam: teto, memoria e fechar com o motivo.
+import { doGhl, vereditoDaMarcacao } from "./entregas_puro.mjs";
 
 let falhas = 0;
 const ok = (c, m) => { if (c) console.log("  ok   " + m); else { console.log("  FALHA " + m); falhas++; } };
@@ -86,6 +93,45 @@ ok(doGhl("pending") === null, "pending nao muda nada — continua 'saiu'");
 ok(doGhl("sent") === null, "'sent' do GHL NAO e entrega: nao mexe no estado");
 ok(doGhl("") === null, "resposta vazia nao inventa estado");
 ok(doGhl("DELIVERED").estado === "entregue", "maiuscula do GHL nao engana o classificador");
+
+console.log("5) a marcacao no MCP termina — sempre");
+const TETO = 5;
+const v = (tentativas, erros, sobrouTempo = true) => vereditoDaMarcacao({ tentativas, teto: TETO, erros, sobrouTempo });
+{
+  const r = v(0, []);
+  ok(r.fecha && !r.desistiu && r.erro === null, "marcou tudo: fecha a linha e nao volta mais");
+}
+{
+  const r = v(0, [], false);
+  ok(!r.fecha && r.tentativas === 0 && r.erro === null,
+     "faltou tempo: volta na proxima rodada e NAO queima tentativa (ficar sem minuto nao e recusa do MCP)");
+}
+{
+  const r = v(0, ["1960805: Erro no servico NitronBoletoSP"]);
+  ok(!r.fecha && r.tentativas === 1 && /tentativa 1\/5/.test(r.erro), "primeiro erro: conta a tentativa e volta");
+}
+{
+  const r = v(3, ["1960805: Erro no servico NitronBoletoSP"]);
+  ok(!r.fecha && r.tentativas === 4, "quarta tentativa ainda volta");
+}
+{
+  const r = v(4, ["1960805: Erro no servico NitronBoletoSP"]);
+  ok(r.fecha && r.desistiu, "no teto a linha FECHA — e isto que impede as 1.881 chamadas");
+  ok(/desistiu apos 5 tentativas/.test(r.erro), "e fecha com o motivo escrito, nao em silencio");
+  ok(/NitronBoletoSP/.test(r.erro), "guardando o erro do MCP, para a TI achar depois");
+}
+{
+  // a prova do laco: simula as rodadas do cron com um erro que nunca passa
+  let tentativas = 0, rodadas = 0, chamadas = 0;
+  const NUFINS = 12;
+  while (rodadas < 500) {
+    const r = v(tentativas, Array.from({ length: NUFINS }, (_, i) => `${i}: erro`));
+    chamadas += NUFINS; tentativas = r.tentativas; rodadas++;
+    if (r.fecha) break;
+  }
+  ok(rodadas === TETO, `erro permanente para em ${TETO} rodadas (antes: ilimitadas)`);
+  ok(chamadas === TETO * NUFINS, `o MCP leva ${TETO * NUFINS} chamadas no pior caso, nao 1.881`);
+}
 
 console.log(falhas ? `\n${falhas} falha(s)` : "\ntudo certo");
 process.exit(falhas ? 1 : 0);
