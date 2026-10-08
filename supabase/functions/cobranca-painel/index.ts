@@ -1,4 +1,4 @@
-// cobranca-painel (v10) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v11) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -61,6 +61,13 @@
 //      o `cobranca_config` era lido sem as colunas de regra (valor_min, atraso, cap), entao a
 //      previa do proximo lote usava o teto PADRAO de 40 em vez do configurado — ela dizia
 //      "4 rodadas" onde o certo era menos.
+//
+// v11: o rodape mudou de nome (08/10). "Depois desta rodada: 89 grupo(s), R$ 109.546,32" foi
+//      lido ao contrario pelo gestor — "que nao consigo enviar a cobranca, nao entendi o
+//      motivo" — e com razao: naquele painel tudo o que fica embaixo e problema a resolver
+//      (nao saiu, sem contato, preso na fila), entao um numero solto parecia a quarta pilha.
+//      Aquele numero nunca foi falha: e quem nao coube no teto e entra na proxima rodada
+//      sozinho. Agora o titulo diz "Proximo lote" e a nota comeca negando o susto.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
@@ -191,6 +198,13 @@ const hhmm = (t: any) => t ? new Date(t).toLocaleString("pt-BR", { timeZone: "Am
  * na hora da proxima rodada, com o espelho recem-lido do Sankhya: quem pagar ate la sai
  * sozinho, e quem vencer no meio entra. Prometer aqui a lista exata seria mentir sobre dado
  * que ainda vai mudar.
+ *
+ * O TITULO JA FOI LIDO AO CONTRARIO. Em 07/10 dizia "Depois desta rodada: 89 grupo(s),
+ * R$ 109.546,32" e o gestor entendeu o oposto do que e: "que nao consigo enviar a cobranca,
+ * nao entendi o motivo". Faz sentido — num painel onde tudo o mais e problema a resolver
+ * (erro, sem contato, preso na fila), um numero solto embaixo parece a quarta pilha de
+ * problema. Entao o titulo agora diz NA PRIMEIRA PALAVRA que isto e o proximo lote, e a
+ * nota diz, sem rodeio, que ninguem aqui esta travado: eles so nao couberam no teto.
  */
 function filaDepois(ctx: any): string {
   const p = ctx.proximos;
@@ -198,9 +212,11 @@ function filaDepois(ctx: any): string {
   const linhas = (p.lista || []).map((g: any) =>
     `<tr><td>${esc(g.nome || "grupo " + g.grupo)}</td><td class="num">${g.titulos}</td><td class="num">${brl(g.valor)}</td></tr>`).join("");
   return `<section class="depois">
-    <h2>Depois desta rodada: ${p.grupos} grupo(s), ${brl(p.valor)}</h2>
-    <p class="nota">Prévia pela dívida, do maior para o menor. A lista definitiva é montada na próxima rodada
-      (${esc(p.quando)}) com os títulos relidos do Sankhya — quem pagar até lá sai sozinho, e quem vencer entra.
+    <h2>Próximo lote: ${p.grupos} grupo(s), ${brl(p.valor)}</h2>
+    <p class="nota"><b>Não é problema nem envio travado:</b> são os que ficaram para a próxima rodada
+      porque o teto desta é de ${p.teto} grupos. Entram automaticamente em ${esc(p.quando)}, sem você
+      precisar fazer nada. Prévia pela dívida, do maior para o menor: a lista definitiva é montada na hora,
+      com os títulos relidos do Sankhya — quem pagar até lá sai sozinho, e quem vencer entra.
       No ritmo de hoje (${p.teto} grupos por rodada), a carteira leva cerca de ${p.rodadas} rodada(s).</p>
     ${linhas ? `<table><tr><th>cliente</th><th>títulos</th><th>valor</th></tr>${linhas}</table>` : ""}
     ${p.grupos > (p.lista || []).length ? `<p class="nota">… e mais ${p.grupos - (p.lista || []).length} grupo(s).</p>` : ""}
