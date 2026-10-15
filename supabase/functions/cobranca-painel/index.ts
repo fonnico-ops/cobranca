@@ -1,4 +1,4 @@
-// cobranca-painel (v12) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v13) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -79,6 +79,15 @@
 //      card diz em que dia foi montado e uma faixa avisa quando ha card velho na lista (o
 //      espelho do Sankhya e daquele dia: quem pagou depois ainda esta ali). `?rodada=`
 //      continua sendo o retrato exato de uma rodada. Regra em `daTela`, com teste.
+//
+// v13: FILTRAR PARA DESMARCAR (15/10). Com 60 cards, tirar um cliente do disparo era rolar a
+//      lista inteira. A barra ganhou busca por cliente, telefone ou e-mail (ignorando acento
+//      e pontuacao dos dois lados), atalhos para os casos que se repetem toda rodada (sem
+//      boleto nem link, so por e-mail, acima de R$ 10 mil) e um PLACAR que conta sempre
+//      todos os marcados — visiveis ou nao. O filtro e so visual: esconder nunca desmarca.
+//      "Marcar"/"Desmarcar" agem no visivel (e o rotulo diz isso), e se sobrar marcado atras
+//      do filtro o placar avisa em vermelho que ele TAMBEM sai. Prendido pelo teste de
+//      navegador `testes/filtro.navegador.mjs`, que confere o POST no fim.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
@@ -178,6 +187,18 @@ export function estadoDaEntrega(e: any, fila: Record<string, any>): { estado: st
 }
 
 const CANAL_ROTULO: Record<string, string> = { whatsapp: "WhatsApp", email: "E-mail" };
+
+/**
+ * O texto pelo qual um card e encontrado na busca da tela.
+ *
+ * Normaliza acento e pontuacao para os dois lados da comparacao: quem digita "acucar" acha
+ * "Açúcar", e quem digita "11 99999-8888" acha "5511999998888". A MESMA funcao roda no
+ * navegador (a tela carrega uma copia identica) — se as duas divergirem, a busca passa a
+ * mentir em silencio, que e o pior defeito possivel numa tela de aprovacao.
+ */
+export function limpaBusca(s: any): string {
+  return String(s ?? "").normalize("NFD").toLowerCase().replace(/[^a-z0-9 ]+/g, "");
+}
 
 /** As entregas de um card, uma linha por mensagem. */
 function entrega(c: any, porCard: Record<string, any[]>, fila: Record<string, any>): string {
@@ -328,7 +349,12 @@ function pagina(todos: any[], ctx: any): string {
            <span class="org" style="background:${ORIGEM_COR[t.origem] || "#888"}">${esc(ORIGEM_ROTULO[t.origem] || t.origem)}</span>
            ${t.nome ? `<span class="quem">${esc(t.nome)}${t.funcao ? " · " + esc(t.funcao) : ""}</span>` : ""}</div>`
       : `<div class="dest vazio"><b>${rotulo}</b> sem contato</div>`;
-    return `<article class="card" data-id="${c.id}">
+    /* O que a busca enxerga neste card: nome, telefone e e-mail. Numero vai com e sem
+       formatacao porque o gestor digita dos dois jeitos. */
+    const busca = limpaBusca([c.nome, ...contatos.map((x: any) => x.valor), ...contatos.map((x: any) => String(x.valor || "").replace(/\D/g, ""))].join(" "));
+    const semComoPagar = !(Array.isArray(c.boleto_links) ? c.boleto_links : []).length && !boletos.length;
+    return `<article class="card" data-id="${c.id}" data-busca="${esc(busca)}"
+      data-sem-boleto="${semComoPagar ? "1" : "0"}" data-wpp="${wpp ? "1" : "0"}" data-valor="${Number(c.valor || 0)}">
       <header>
         <label><input type="checkbox" class="sel" value="${c.id}" checked></label>
         <div class="tit"><h3>${esc(c.nome || "grupo " + c.grupo)}</h3>
@@ -378,6 +404,13 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .msg{white-space:pre-wrap;background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;margin:10px 0 0;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 .jasaiu{margin-top:8px;font-size:12.5px;color:var(--mut)}
 #aviso{padding:10px 12px;border-radius:8px;margin:10px 0;display:none}
+#busca{flex:1 1 220px;min-width:160px;font:14px system-ui;padding:8px 11px;border:1px solid var(--bd);border-radius:8px;background:var(--card);color:var(--fg)}
+.atalhos{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12.5px;color:var(--mut);margin:10px 0 0}
+.chip{font:500 12.5px system-ui;padding:4px 11px;border-radius:99px;border:1px solid var(--bd);background:var(--card);color:var(--mut);cursor:pointer}
+.chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
+#placar{font-size:13.5px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:9px 12px;margin:10px 0 0}
+#placar b{font-size:15px}
+#placar .alerta-escondido{color:#c0392b;font-weight:600}
 .ritmo{font-size:13px;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 11px;margin:0 0 12px}
 .entrega{margin-top:10px;border-top:1px solid var(--bd);padding-top:8px}
 .ent{display:flex;gap:7px;align-items:baseline;flex-wrap:wrap;font-size:12.5px;margin:3px 0}
@@ -419,12 +452,22 @@ ${ctx.wppPausado
 <div class="barra">
   <button id="todos">Marcar todos</button><button id="nenhum">Desmarcar</button>
   <span style="flex:1"></span>
+  <input id="busca" type="search" placeholder="filtrar por cliente, telefone ou e-mail…" aria-label="filtrar">
+  <span style="flex:1"></span>
   <a href="?aba=entregas${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Entregas &rarr;</a>
   <a href="?aba=conversas${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Conversas da Nina &rarr;</a>
   <a href="?aba=saude${ctx.sufixo}" style="font-size:13px;color:var(--ac);text-decoration:none;align-self:center">Saúde &rarr;</a>
   <button id="recusar">Recusar</button>
   <button id="aprovar" class="go">Aprovar e disparar</button>
 </div>
+${cards.length ? `<div class="atalhos">
+  <b>atalhos:</b>
+  <button class="chip" data-chip="sem">sem boleto nem link</button>
+  <button class="chip" data-chip="wpp">só por e-mail (sem WhatsApp)</button>
+  <button class="chip" data-chip="alto">acima de R$ 10 mil</button>
+  <button class="chip" data-chip="">mostrar todos</button>
+</div>
+<div id="placar"></div>` : ""}
 <div id="aviso"></div>
 ${saiuResumo}
 ${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação — nem hoje, nem nas rodadas dos últimos 30 dias.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) de hoje já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>A próxima rodada é montada sozinha em " + esc(ctx.proximos?.quando || "segunda, quarta ou sexta, 9h") + "."}</div>`}
@@ -436,8 +479,55 @@ const $=(s)=>document.querySelector(s), $$=(s)=>[...document.querySelectorAll(s)
 const sels=()=>$$(".sel:checked:not([disabled])").map(x=>Number(x.value));
 function aviso(t,erro){const a=$("#aviso");a.style.display="block";a.textContent=t;
   a.style.background=erro?"#fde8e8":"#e6f6ee";a.style.color=erro?"#8a1c1c":"#0a5c38";}
-$("#todos").onclick=()=>$$(".sel:not([disabled])").forEach(x=>x.checked=true);
-$("#nenhum").onclick=()=>$$(".sel").forEach(x=>x.checked=false);
+/* FILTRAR PARA DESMARCAR.
+   Com 60 cards na tela, achar um cliente para tirar do disparo era rolar a lista inteira.
+   Tres regras tornam isso seguro:
+     1. o filtro e so VISUAL: esconder um card nunca muda a caixinha dele;
+     2. "Marcar"/"Desmarcar" agem no que esta VISIVEL — e para isso que se filtra — e o
+        rotulo do botao muda para dizer isso quando ha filtro ligado;
+     3. o PLACAR conta sempre TODOS os marcados, visiveis ou nao, e grita em vermelho
+        quando ha marcado escondido pelo filtro. Sem isso, "o que eu vejo e o que vai sair"
+        vira uma suposicao falsa, e o erro so aparece depois que a mensagem ja saiu. */
+const limpa=(s)=>String(s||"").normalize("NFD").toLowerCase().replace(/[^a-z0-9 ]+/g,"");
+let chipAtivo="";
+const cardsTodos=()=>$$(".card");
+const visivel=(c)=>c.style.display!=="none";
+const brlJs=(v)=>"R$ "+Number(v||0).toLocaleString("pt-BR",{minimumFractionDigits:2,maximumFractionDigits:2});
+function filtrar(){
+  const t=limpa($("#busca")?$("#busca").value:"");
+  cardsTodos().forEach(c=>{
+    const achouTexto=!t||limpa(c.dataset.busca).indexOf(t)>=0;
+    const achouChip=!chipAtivo
+      ||(chipAtivo==="sem"&&c.dataset.semBoleto==="1")
+      ||(chipAtivo==="wpp"&&c.dataset.wpp==="0")
+      ||(chipAtivo==="alto"&&Number(c.dataset.valor||0)>=10000);
+    c.style.display=(achouTexto&&achouChip)?"":"none";
+  });
+  const filtrando=!!t||!!chipAtivo;
+  $("#todos").textContent=filtrando?"Marcar visíveis":"Marcar todos";
+  $("#nenhum").textContent=filtrando?"Desmarcar visíveis":"Desmarcar";
+  placar();
+}
+function placar(){
+  const p=$("#placar"); if(!p) return;
+  const todas=$$(".sel"), marcadas=todas.filter(x=>x.checked);
+  const soma=marcadas.reduce((a,x)=>a+Number(x.closest(".card").dataset.valor||0),0);
+  const escondidas=marcadas.filter(x=>!visivel(x.closest(".card"))).length;
+  const naTela=cardsTodos().filter(visivel).length;
+  p.innerHTML="<b>"+marcadas.length+" de "+todas.length+"</b> marcados · "+brlJs(soma)+" vai sair no disparo"
+    +(naTela!==todas.length?" · <span>mostrando "+naTela+" na tela</span>":"")
+    +(escondidas?" · <span class='alerta-escondido'>"+escondidas+" marcado(s) escondido(s) pelo filtro — eles TAMBÉM saem</span>":"");
+}
+$("#todos").onclick=()=>{cardsTodos().filter(visivel).forEach(c=>{const s=c.querySelector(".sel");if(s&&!s.disabled)s.checked=true;});placar();};
+$("#nenhum").onclick=()=>{cardsTodos().filter(visivel).forEach(c=>{const s=c.querySelector(".sel");if(s)s.checked=false;});placar();};
+if($("#busca")) $("#busca").oninput=filtrar;
+$$(".chip").forEach(b=>b.onclick=()=>{
+  chipAtivo=(b.dataset.chip===chipAtivo)?"":b.dataset.chip;
+  $$(".chip").forEach(o=>o.classList.toggle("on",!!o.dataset.chip&&o.dataset.chip===chipAtivo));
+  filtrar();
+});
+$$(".sel").forEach(s=>s.addEventListener("change",placar));
+placar();
 async function manda(acao){
   const ids=sels();
   if(!ids.length) return aviso("Nenhum card marcado.",true);
@@ -449,7 +539,7 @@ async function manda(acao){
     const d=await r.json();
     if(!d.ok) throw new Error(d.erro||"falhou");
     aviso(acao==="aprovar"
-      ? ("Pronto: "+(d.enfileirados||0)+" grupo(s) \\u2014 "+(d.whatsapp_retidas!=null?d.whatsapp_retidas:(d.whatsapp_na_fila||0))+" WhatsApp retidos (saem 1 por n\\u00famero a cada 2 min), "+(d.email_enviado||0)+" e-mail enviado"+(d.erros?", "+d.erros+" com erro":"")+(d.numeros_recusados_antes_de_enviar?", "+d.numeros_recusados_antes_de_enviar+" n\\u00famero(s) recusado(s) na confer\\u00eancia":"")+(d.segurados_ate_o_whatsapp_voltar?", "+d.segurados_ate_o_whatsapp_voltar+" esperando o WhatsApp voltar":"")+". Recarregando\\u2026")
+      ? ("Pronto: "+(d.enfileirados||0)+" grupo(s) \— "+(d.whatsapp_retidas!=null?d.whatsapp_retidas:(d.whatsapp_na_fila||0))+" WhatsApp retidos (saem 1 por n\\u00famero a cada 2 min), "+(d.email_enviado||0)+" e-mail enviado"+(d.erros?", "+d.erros+" com erro":"")+(d.numeros_recusados_antes_de_enviar?", "+d.numeros_recusados_antes_de_enviar+" n\\u00famero(s) recusado(s) na confer\\u00eancia":"")+(d.segurados_ate_o_whatsapp_voltar?", "+d.segurados_ate_o_whatsapp_voltar+" esperando o WhatsApp voltar":"")+". Recarregando\\u2026")
       : ((d.recusados||0)+" recusado(s). Recarregando\\u2026"));
     setTimeout(()=>location.reload(),2200);
   }catch(e){aviso("Erro: "+e.message,true);$("#aprovar").disabled=false;$("#recusar").disabled=false;}

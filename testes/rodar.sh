@@ -19,7 +19,10 @@ fs.writeFileSync("montar_puro.ts", s.slice(0, s.indexOf("Deno.serve(")).replace(
 // atende e seguir ja usam `export function`: aqui basta fatiar.
 for (const fn of ["cobranca-atende","cobranca-seguir","cobranca-emitidos","cobranca-painel","cobranca-refresh","cobranca-vigia","cobranca-entregas","cobranca-liberar","cobranca-fones","cobranca-aprovar"]) {
   const t=fs.readFileSync("../supabase/functions/"+fn+"/index.ts","utf8");
-  fs.writeFileSync(fn.replace("cobranca-","")+"_puro.ts", t.slice(0, t.indexOf("Deno.serve(")).replace(/^import .*$/gm,""));
+  // `pagina` e `function pagina` (sem export) porque so a propria funcao a usa em producao.
+  // O teste de navegador precisa dela para montar a tela de verdade, entao aqui ela sai.
+  const extra = fn==="cobranca-painel" ? "\nexport { pagina };\n" : "";
+  fs.writeFileSync(fn.replace("cobranca-","")+"_puro.ts", t.slice(0, t.indexOf("Deno.serve(")).replace(/^import .*$/gm,"") + extra);
 }'
 
 # --bundle: o boleto_pdf importa ./qr.ts. O Deno resolve isso sozinho em producao;
