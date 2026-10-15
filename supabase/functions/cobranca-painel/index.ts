@@ -1,4 +1,4 @@
-// cobranca-painel (v11) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v12) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -68,6 +68,17 @@
 //      (nao saiu, sem contato, preso na fila), entao um numero solto parecia a quarta pilha.
 //      Aquele numero nunca foi falha: e quem nao coube no teto e entra na proxima rodada
 //      sozinho. Agora o titulo diz "Proximo lote" e a nota comeca negando o susto.
+//
+// v12: A TELA DEIXOU DE ESCONDER DECISAO PENDENTE (15/10). Ela pedia ao banco `rodada = hoje`
+//      e mais nada. Numa quinta-feira — dia em que o cron nao monta — abriu vazia dizendo
+//      "Nada esperando aprovacao nesta rodada. Rode o cobranca-montar", com 180 grupos de
+//      sexta, segunda e quarta parados em `aguardando`: R$ 1,94 milhao que ninguem via. O
+//      gestor leu a tela e concluiu que o sistema nao tinha gerado os cards; o sistema tinha
+//      gerado, e a pergunta que a tela fazia ao banco e que estava errada. Agora `aguardando`
+//      aparece de qualquer rodada dos ultimos 30 dias, o dia de hoje aparece inteiro, cada
+//      card diz em que dia foi montado e uma faixa avisa quando ha card velho na lista (o
+//      espelho do Sankhya e daquele dia: quem pagou depois ainda esta ali). `?rodada=`
+//      continua sendo o retrato exato de uma rodada. Regra em `daTela`, com teste.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
@@ -188,6 +199,27 @@ function entrega(c: any, porCard: Record<string, any[]>, fila: Record<string, an
 const hhmm = (t: any) => t ? new Date(t).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" }) : "";
 
 /**
+ * O QUE A TELA DE APROVACAO MOSTRA.
+ *
+ * Funcao pura porque a regra anterior custou uma semana de silencio. Ate 15/10 a tela pedia
+ * `rodada = hoje` ao banco e so isso. Numa quinta — dia em que o cron nao monta — ela abria
+ * vazia, dizendo "Nada esperando aprovacao nesta rodada. Rode o cobranca-montar", enquanto
+ * 180 grupos montados na sexta, na segunda e na quarta esperavam decisao: R$ 1,94 milhao
+ * invisiveis. O gestor leu a tela e concluiu que o sistema nao tinha gerado nada. A tela nao
+ * mentiu por erro de conta: mentiu porque a pergunta que ela fazia ao banco era a errada.
+ *
+ * A regra certa tem duas partes:
+ *   - DECISAO PENDENTE NAO TEM DATA. Todo `aguardando` da janela aparece, de qualquer rodada.
+ *   - O DIA DE HOJE APARECE INTEIRO. Disparados e erros de hoje continuam na tela, porque e
+ *     o acompanhamento do dia.
+ * Com `?rodada=` explicito a tela volta a ser o retrato daquela rodada, para auditoria.
+ */
+export function daTela(linhas: any[], hoje: string, rodadaPedida: string | null): any[] {
+  if (rodadaPedida) return linhas;
+  return linhas.filter((c: any) => c.status === "aguardando" || String(c.rodada).slice(0, 10) === hoje);
+}
+
+/**
  * O QUE VEM DEPOIS DESTA RODADA.
  *
  * A tela mostrava so os 60 do teto e terminava ali. Quem olha nao tinha como saber que
@@ -302,7 +334,8 @@ function pagina(todos: any[], ctx: any): string {
         <div class="tit"><h3>${esc(c.nome || "grupo " + c.grupo)}</h3>
           <div class="meta">${c.n_titulos} título${c.n_titulos > 1 ? "s" : ""}
             ${c.fase === "vencido" ? ` · maior atraso <b>${c.maior_atraso}d</b>` : ""}
-            ${(c.codparcs || []).length > 1 ? ` · ${(c.codparcs || []).length} lojas` : ""}</div></div>
+            ${(c.codparcs || []).length > 1 ? ` · ${(c.codparcs || []).length} lojas` : ""}
+            ${String(c.rodada).slice(0, 10) !== ctx.rodada ? ` · <b style="color:#c60">montado em ${esc(String(c.rodada).slice(8, 10) + "/" + String(c.rodada).slice(5, 7))}</b>` : ""}</div></div>
         <div class="vlr">${brl(c.valor)}</div>
       </header>
       <div class="anex">
@@ -370,7 +403,10 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 @media(max-width:560px){.wrap{padding:12px}.card header{flex-wrap:wrap}.vlr{width:100%}}
 </style></head><body><div class="wrap">
 <h1>Cobrança — ${ctx.fase === "vencido" ? "títulos vencidos" : "a vencer na próxima semana"}</h1>
-<div class="sub">rodada ${esc(ctx.rodada)} · <b>${cards.length} grupo(s) esperando aprovação</b> · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
+<div class="sub">${esc(ctx.deOndeVem)} · <b>${cards.length} grupo(s) esperando aprovação</b> · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
+${ctx.atrasados ? `<div class="alerta">${ctx.atrasados} destes grupos foram montados em rodadas anteriores e ninguém decidiu sobre eles —
+  o mais antigo tem <b>${ctx.diasDoMaisVelho} dia(s)</b>. Os valores vêm do espelho do Sankhya daquele dia: quem pagou desde então
+  pode estar nesta lista. Se a espera te incomodar, recuse tudo e monte de novo — o <code>cobranca-montar</code> relê os títulos na hora.</div>` : ""}
 ${ctx.wppPausado
   ? `<div class="alerta">Nenhum número da cobrança está de pé${ctx.caidas?.length ? " (" + esc(ctx.caidas.join(", ")) + ")" : ""}.
        Aprovando agora, saem <b>${porMail} por e-mail</b>, na hora.
@@ -391,7 +427,7 @@ ${ctx.wppPausado
 </div>
 <div id="aviso"></div>
 ${saiuResumo}
-${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação nesta rodada.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) desta rodada já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>Rode o <code>cobranca-montar</code> para montar a fila."}</div>`}
+${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação — nem hoje, nem nas rodadas dos últimos 30 dias.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) de hoje já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>A próxima rodada é montada sozinha em " + esc(ctx.proximos?.quando || "segunda, quarta ou sexta, 9h") + "."}</div>`}
 ${bloqueados}
 ${filaDepois(ctx)}
 </div><script>
@@ -1014,9 +1050,44 @@ Deno.serve(async (req) => {
       });
     }
 
-    const { data: cards, error } = await sb.from("cobranca_fila").select("*")
-      .eq("rodada", rodada).eq("fase", fase).order("valor", { ascending: false }).limit(300);
+    /* O QUE ESPERA APROVACAO NAO MORRE NA VIRADA DO DIA.
+       Ate 15/10 esta consulta era `.eq("rodada", hoje)`. Numa quinta-feira — dia em que o cron
+       nao monta nada — a tela abria vazia dizendo "Nada esperando aprovacao nesta rodada. Rode
+       o cobranca-montar", enquanto 180 grupos montados na sexta, na segunda e na quarta
+       estavam parados em `aguardando`: R$ 1,94 milhao que ninguem via. O gestor olhou a tela e
+       concluiu, com razao, que o sistema nao tinha gerado nada.
+       Tela de aprovacao que esconde o que espera aprovacao e pior do que tela nenhuma: some
+       com o trabalho E ainda manda fazer de novo.
+       Agora, sem `?rodada=` explicito, a tela traz TUDO que aguarda decisao nos ultimos 30
+       dias, mais o que aconteceu hoje (disparados e erros, que e o acompanhamento do dia).
+       Com `?rodada=` ela continua mostrando exatamente aquela rodada, para quem quer auditar. */
+    /* DUAS CONSULTAS, e nao uma com filtro depois. A primeira tentativa deste conserto pedia
+       os ultimos 30 dias inteiros e peneirava em TS — mas a janela tem 620 linhas, o
+       `.limit(500)` cortava por valor, e 35 `aguardando` de valor baixo ficavam de fora. Seria
+       o mesmo bug de novo, um degrau abaixo: um teto escondendo decisao pendente. Entao o
+       filtro de status vai para o BANCO, onde ele limita o que importa. */
+    const rodadaPedida = u.searchParams.get("rodada");
+    const janela = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+    let todosOsDias: any[] = [];
+    let error: any = null;
+    if (rodadaPedida) {
+      const r = await sb.from("cobranca_fila").select("*")
+        .eq("fase", fase).eq("rodada", rodada).order("valor", { ascending: false }).limit(500);
+      todosOsDias = r.data || []; error = r.error;
+    } else {
+      const [pend, hoje] = await Promise.all([
+        sb.from("cobranca_fila").select("*").eq("fase", fase).eq("status", "aguardando")
+          .gte("rodada", janela).order("valor", { ascending: false }).limit(500),
+        sb.from("cobranca_fila").select("*").eq("fase", fase).eq("rodada", rodada)
+          .order("valor", { ascending: false }).limit(500),
+      ]);
+      error = pend.error || hoje.error;
+      const porId = new Map<string, any>();
+      for (const c of [...(pend.data || []), ...(hoje.data || [])]) porId.set(String(c.id), c);
+      todosOsDias = [...porId.values()].sort((a, b) => Number(b.valor || 0) - Number(a.valor || 0));
+    }
     if (error) throw error;
+    const cards = daTela(todosOsDias, rodada, rodadaPedida);
 
     /* O estado dos numeros e o ritmo, para a tela dizer quanto tempo o disparo leva e o que
        acontece com um numero fora do ar — as duas perguntas que so apareciam DEPOIS do clique.
@@ -1087,8 +1158,24 @@ Deno.serve(async (req) => {
       comVeredito += Number(count || 0);
     }
 
+    /* De onde vem o que esta na tela, dito em palavras: "rodada de hoje" nao e verdade quando
+       a lista traz grupos de tres dias diferentes, e o cabecalho e a primeira coisa que o
+       gestor le para saber se pode confiar no resto. */
+    const esperando = (cards || []).filter((c: any) => c.status === "aguardando");
+    const diasDe = [...new Set(esperando.map((c: any) => String(c.rodada).slice(0, 10)))].sort();
+    const atrasados = esperando.filter((c: any) => String(c.rodada).slice(0, 10) !== rodada).length;
+    const maisVelho = diasDe[0];
+    const diasDoMaisVelho = maisVelho
+      ? Math.round((new Date(rodada + "T00:00:00Z").getTime() - new Date(maisVelho + "T00:00:00Z").getTime()) / 864e5) : 0;
+    const deOndeVem = rodadaPedida
+      ? `rodada ${rodada}`
+      : (diasDe.length > 1
+        ? `${diasDe.length} rodadas: ${diasDe.map((d: string) => d.slice(8, 10) + "/" + d.slice(5, 7)).join(", ")}`
+        : `rodada ${diasDe[0] || rodada}`);
+
     return new Response(pagina(cards || [], {
       rodada, fase, instancia: dePe.join(" e ") || rodizio.join(" e "), desligado: cfg?.ativo !== true, sufixo,
+      deOndeVem, atrasados, diasDoMaisVelho,
       wppPausado: dePe.length === 0, segPorMsg, porCard, fila, proximos,
       rodizio: dePe, caidas, intervaloSeg,
       janelaDe: Number(cfg?.janela_hora_de ?? 8), janelaAte: Number(cfg?.janela_hora_ate ?? 20),

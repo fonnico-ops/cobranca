@@ -13,7 +13,12 @@
 //      10 minutos. Entre duas rodadas, a linha ATUAL do fila_envio manda — senao, em 25/09, as
 //      24 mensagens presas pela queda do numero apareceriam como "na fila" mesmo depois de
 //      sairem, e as que falharam apareceriam como se estivessem esperando.
-import { doFila, estadoDaEntrega, ESTADO } from "./painel_puro.mjs";
+//
+//   4. ESCONDER O QUE ESPERA APROVACAO. Ate 15/10 a tela pedia ao banco so a rodada de HOJE.
+//      Numa quinta, dia em que o cron nao monta, ela abria vazia mandando "rode o
+//      cobranca-montar" — com 180 grupos de sexta, segunda e quarta parados em `aguardando`,
+//      R$ 1,94 milhao que ninguem via. O bloco 6 prende a regra: decisao pendente nao tem data.
+import { doFila, estadoDaEntrega, ESTADO, daTela } from "./painel_puro.mjs";
 //
 //   3. UM RETRY QUE NAO TERMINA. Em 07/10 as 16:20 uma linha comecou a falhar na marcacao do
 //      MCP com erro do servico do ERP. Como o codigo so gravava o erro e deixava a linha em
@@ -131,6 +136,34 @@ const v = (tentativas, erros, sobrouTempo = true) => vereditoDaMarcacao({ tentat
   }
   ok(rodadas === TETO, `erro permanente para em ${TETO} rodadas (antes: ilimitadas)`);
   ok(chamadas === TETO * NUFINS, `o MCP leva ${TETO * NUFINS} chamadas no pior caso, nao 1.881`);
+}
+
+console.log("6) a tela de aprovação não esconde decisão pendente de outro dia");
+const HOJE = "2026-10-15";
+const linhas = [
+  { id: 1, rodada: "2026-10-09", status: "aguardando" },   // sexta, ninguém decidiu
+  { id: 2, rodada: "2026-10-12", status: "aguardando" },   // segunda, idem
+  { id: 3, rodada: "2026-10-14", status: "aguardando" },   // quarta, idem
+  { id: 4, rodada: "2026-10-14", status: "enfileirado" },  // já saiu, dia anterior
+  { id: 5, rodada: "2026-10-14", status: "erro" },         // erro de dia anterior
+  { id: 6, rodada: HOJE, status: "enfileirado" },          // saiu hoje
+  { id: 7, rodada: HOJE, status: "erro" },                 // erro de hoje
+];
+{
+  const r = daTela(linhas, HOJE, null).map((x) => x.id);
+  ok(r.includes(1) && r.includes(2) && r.includes(3), "os 3 `aguardando` de dias anteriores APARECEM (era o bug)");
+  ok(r.includes(6) && r.includes(7), "o dia de hoje aparece inteiro: disparado e erro");
+  ok(!r.includes(4), "o que já foi disparado num dia anterior não volta para a tela de decisão");
+  ok(r.length === 5, "nada além disso");
+}
+{
+  // numa quinta sem rodada montada, a tela NAO pode dizer "nada esperando"
+  const quinta = daTela(linhas.filter((x) => x.rodada !== HOJE), HOJE, null);
+  ok(quinta.length === 3, "sem rodada montada hoje, os 3 pendentes continuam visíveis");
+}
+{
+  const r = daTela(linhas, HOJE, "2026-10-14").map((x) => x.id);
+  ok(r.length === 7, "com ?rodada= explícito a tela entrega o que o banco filtrou, sem mexer");
 }
 
 console.log(falhas ? `\n${falhas} falha(s)` : "\ntudo certo");
