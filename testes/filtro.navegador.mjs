@@ -41,7 +41,7 @@ const html = pagina(cards, {
   sufixo: "&k=CHAVE", wppPausado: false, segPorMsg: 60, porCard: {}, fila: {},
   rodizio: ["Karla", "Bianca"], caidas: [], intervaloSeg: 120, janelaDe: 8, janelaAte: 20,
   semVeredito: 0, deOndeVem: "rodada 2026-10-15", atrasados: 0, diasDoMaisVelho: 0,
-  proximos: { grupos: 148, valor: 323159, teto: 60, rodadas: 4, quando: "sexta, 9h", lista: [] },
+  proximos: { grupos: 148, valor: 323159, teto: 60, rodadas: 4, quando: "sexta, 9h", lista: [] }, fase: "vencido",
   api: `${ALVO}?fase=vencido&k=CHAVE`,
 });
 
@@ -52,6 +52,9 @@ const srv = http.createServer((req, res) => {
     return req.on("end", () => {
       ultimoPost = JSON.parse(b);
       res.writeHead(200, { "Content-Type": "application/json" });
+      if (ultimoPost.acao === "montar") {
+        return res.end('{"ok":true,"montagem":{"ok":true,"gravados":60,"com_link":52}}');
+      }
       res.end('{"ok":true,"enfileirados":1,"whatsapp_retidas":1,"email_enviado":1}');
     });
   }
@@ -118,7 +121,18 @@ ok(ultimoPost && ultimoPost.acao === "aprovar", "acao=aprovar");
 ok(ultimoPost && ultimoPost.ids.sort().join() === "1,3,4",
    "o POST leva exatamente os 3 marcados — o PALACE desmarcado atras do filtro NAO foi junto");
 
-console.log("8) nenhum erro de script");
+console.log("8) montar o proximo lote: prepara, nao dispara");
+ok(await page.locator("#montar").isVisible(), "o botao de montar aparece no bloco do proximo lote");
+ok(/n.o envia nada/i.test(await page.locator(".montar .nota").innerText()), "a nota diz, em palavras, que nao envia nada");
+ultimoPost = null;
+await page.click("#montar");
+await page.waitForTimeout(700);
+ok(!!ultimoPost && ultimoPost.acao === "montar", "o POST pede montagem");
+ok(!!ultimoPost && ultimoPost.fase === "vencido", "e leva a fase da aba");
+ok(!!ultimoPost && !("ids" in ultimoPost), "o POST de montar NAO leva ids — nao e disparo");
+ok(/60 grupo\(s\) montados/.test(await page.locator("#aviso").innerText()), "o aviso confirma o que foi montado");
+
+console.log("9) nenhum erro de script");
 ok(erros.length === 0, erros.length ? "erros: " + erros.join(" | ") : "console limpo");
 
 await browser.close(); srv.close();

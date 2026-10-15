@@ -1,4 +1,4 @@
-// cobranca-painel (v13) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v14) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -89,10 +89,21 @@
 //      do filtro o placar avisa em vermelho que ele TAMBEM sai. Prendido pelo teste de
 //      navegador `testes/filtro.navegador.mjs`, que confere o POST no fim.
 //
+// v14: MONTAR O PROXIMO LOTE PELA TELA (15/10). Ate aqui so o cron (seg/qua/sex, 9h) ou
+//      alguem com acesso ao banco podia montar: numa quinta, ou logo depois de aprovar os
+//      60 do dia, o gestor via "Proximo lote: 208 grupos" e nao tinha como pedir os
+//      proximos. O bloco do proximo lote ganhou botao. Montar escreve rascunho
+//      (`aguardando`) e nao envia nada — o disparo continua sendo um segundo clique, com
+//      `auto_aprovar` em false. Seguro de expor porque o montar nao toca no que ja saiu,
+//      pula quem foi cobrado nos ultimos `reenvio_min_dias` (entao traz o lote SEGUINTE) e
+//      rele o Sankhya na hora. A espera tem teto de 110s: estourando, a tela diz que a
+//      montagem continua rodando, nao que falhou.
+//
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
 // GET  ?aba=conversas | ?aba=saude&dias=30
 // POST { acao:"aprovar"|"recusar", ids:[...] } -> repassa ao cobranca-aprovar
+// POST { acao:"montar", fase } -> repassa ao cobranca-montar (so prepara; nao envia)
 //
 // O que a tela mostra de proposito, antes do botao:
 //   - a MENSAGEM inteira, como o cliente vai ler. Aprovar sem ler o texto nao e aprovar.
@@ -273,6 +284,12 @@ function filaDepois(ctx: any): string {
       No ritmo de hoje (${p.teto} grupos por rodada), a carteira leva cerca de ${p.rodadas} rodada(s).</p>
     ${linhas ? `<table><tr><th>cliente</th><th>títulos</th><th>valor</th></tr>${linhas}</table>` : ""}
     ${p.grupos > (p.lista || []).length ? `<p class="nota">… e mais ${p.grupos - (p.lista || []).length} grupo(s).</p>` : ""}
+    <div class="montar">
+      <button id="montar">Montar este lote agora (${Math.min(p.teto, p.grupos)} grupos)</button>
+      <span class="nota">Monta as mensagens e <b>não envia nada</b> — elas sobem para a lista de cima,
+        esperando a sua aprovação. Leva 1 a 2 minutos${ctx.temAguardando ? `. Atenção: os ${ctx.temAguardando} card(s)
+        que ainda esperam aprovação são rascunho e serão refeitos com os títulos relidos agora` : ""}.</span>
+    </div>
   </section>`;
 }
 
@@ -292,6 +309,8 @@ function pagina(todos: any[], ctx: any): string {
   const jaSairam = todos.filter((c: any) => c.status === "enfileirado" || c.status === "aprovado");
   const naoSairam = todos.filter((c: any) => c.status === "erro" || c.status === "sem_contato");
   const total = cards.reduce((a, c) => a + Number(c.valor || 0), 0);
+  // o aviso do botao de montar precisa saber quantos rascunhos seriam refeitos
+  ctx.temAguardando = cards.length;
 
   /* QUANTO TEMPO ISTO VAI LEVAR, antes de clicar.
      O WhatsApp nao sai de uma vez, e desde 07/10 o ritmo e da COBRANCA e nao do trilho
@@ -411,6 +430,8 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 #placar{font-size:13.5px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:9px 12px;margin:10px 0 0}
 #placar b{font-size:15px}
 #placar .alerta-escondido{color:#c0392b;font-weight:600}
+.montar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--bd)}
+.montar .nota{flex:1 1 280px;margin:0}
 .ritmo{font-size:13px;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 11px;margin:0 0 12px}
 .entrega{margin-top:10px;border-top:1px solid var(--bd);padding-top:8px}
 .ent{display:flex;gap:7px;align-items:baseline;flex-wrap:wrap;font-size:12.5px;margin:3px 0}
@@ -475,6 +496,7 @@ ${bloqueados}
 ${filaDepois(ctx)}
 </div><script>
 const API=${JSON.stringify(ctx.api)};
+const FASE=${JSON.stringify(ctx.fase)};
 const $=(s)=>document.querySelector(s), $$=(s)=>[...document.querySelectorAll(s)];
 const sels=()=>$$(".sel:checked:not([disabled])").map(x=>Number(x.value));
 function aviso(t,erro){const a=$("#aviso");a.style.display="block";a.textContent=t;
@@ -546,6 +568,26 @@ async function manda(acao){
 }
 $("#aprovar").onclick=()=>manda("aprovar");
 $("#recusar").onclick=()=>manda("recusar");
+/* Montar escreve rascunho e nao envia nada — por isso o aviso do confirm fala de PREPARAR,
+   e nao de disparar. Quem dispara continua sendo o botao verde, num segundo clique. */
+if($("#montar")) $("#montar").onclick=async()=>{
+  if(!confirm("Montar o pr\\u00f3ximo lote?\\n\\nIsto apenas PREPARA as mensagens para a sua aprova\\u00e7\\u00e3o. Nada sai para cliente nenhum agora.")) return;
+  const b=$("#montar"); b.disabled=true; const antes=b.textContent;
+  b.textContent="Montando\\u2026 (1 a 2 min)";
+  aviso("Montando o pr\\u00f3ximo lote\\u2026 isso leva 1 a 2 minutos. N\\u00e3o feche a p\\u00e1gina.");
+  try{
+    const r=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao:"montar",fase:FASE})});
+    const d=await r.json();
+    if(d.ainda_rodando){
+      aviso("A montagem passou do tempo de espera e continua rodando no servidor. Recarregue a p\\u00e1gina em 1 minuto para ver os cards.");
+      b.disabled=false; b.textContent=antes; return;
+    }
+    if(!d.ok) throw new Error((d.montagem&&d.montagem.erro)||d.erro||"falhou");
+    const m=d.montagem||{};
+    aviso("Pronto: "+(m.gravados||0)+" grupo(s) montados"+(m.com_link?", "+m.com_link+" com link do boleto":"")+". Recarregando\\u2026");
+    setTimeout(()=>location.reload(),1800);
+  }catch(e){aviso("Erro ao montar: "+e.message,true);b.disabled=false;b.textContent=antes;}
+};
 </script></body></html>`;
 }
 
@@ -1097,6 +1139,37 @@ Deno.serve(async (req) => {
 
     if (req.method === "POST") {
       const b = await req.json().catch(() => ({}));
+
+      /* MONTAR O PROXIMO LOTE PELA TELA.
+         Ate aqui so o cron (segunda, quarta e sexta) ou alguem com acesso ao banco podia
+         montar; numa quinta, ou depois de aprovar os 60 do dia, o gestor ficava esperando
+         sem ter o que fazer. Montar nao envia NADA: escreve cards em `aguardando`, que e
+         rascunho. O disparo continua sendo um segundo clique, de proposito.
+         Tres coisas que fazem isto ser seguro de botao:
+           - o montar nunca toca no que ja saiu (enfileirado/aprovado/recusado);
+           - ele exclui quem foi cobrado nos ultimos `reenvio_min_dias`, entao rodar depois
+             de aprovar traz o LOTE SEGUINTE, nao o mesmo de novo;
+           - ele rele o Sankhya na hora, entao quem pagou nao entra.
+         O ESPERAR TEM LIMITE. A montagem leva de 1 a 2 minutos (ela fala com o MCP por
+         card) e a funcao que espera tambem tem prazo. Se estourar, a resposta NAO diz que
+         falhou: diz que continua rodando, porque e verdade — e repetir a montagem seria
+         inofensivo de qualquer jeito, ja que a chave e (rodada, fase, grupo). */
+      if (b.acao === "montar") {
+        const corpoM = JSON.stringify({ fase: String(b.fase || "vencido") });
+        try {
+          const r = await fetch(Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-montar", {
+            method: "POST",
+            headers: { Authorization: "Bearer " + srvKey(), "Content-Type": "application/json" },
+            body: corpoM,
+            signal: AbortSignal.timeout(110000),
+          });
+          const d = await r.json().catch(() => ({}));
+          return j({ ok: d?.ok !== false, montagem: d }, r.status);
+        } catch (_e) {
+          return j({ ok: true, ainda_rodando: true });
+        }
+      }
+
       const ids = (Array.isArray(b.ids) ? b.ids : []).map((x: any) => Number(x)).filter(Boolean);
       if (!ids.length) return j({ ok: false, erro: "sem ids" }, 400);
       const corpo = b.acao === "recusar"
