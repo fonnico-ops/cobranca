@@ -1,4 +1,24 @@
-// cobranca-aprovar (v6) — aprova os cards da fila e dispara. Tudo pelo GHL, pela cobranca.
+// cobranca-aprovar (v7) — aprova os cards da fila e dispara. Tudo pelo GHL, pela cobranca.
+//
+// v7: O GUARDA DE "JA PAGOU" PASSOU A VALER DE VERDADE (pergunta do gestor em 20/10:
+//     "se formos rodar novamente e aparece ainda os que ja foram pagos, iriamos mandar
+//     cobranca a toa").
+//     A conferencia dos NUFINs contra o `cobranca_titulo` existia desde a v5, mas tinha dois
+//     buracos, e os dois foram medidos nos dados de 20/10 antes de serem fechados:
+//       1. IDADE DO ESPELHO. O comentario dizia "o cobranca_titulo, que o refresh acabou de
+//          reescrever" — verdade pelo cron, falso pelo painel. Em 20/10 o espelho era de 19/10
+//          as 17:10 e nada conferia isso: quem pagou no dia seguia "em aberto" aos olhos do
+//          guarda. Dos 60 cards a_vencer montados em 16/10, 11 ja tinham titulo pago
+//          (R$ 87.168,96) — e esse numero esta SUBESTIMADO, porque o espelho da comparacao
+//          tambem era de ontem. Agora, espelho que nao e de hoje recusa o lote inteiro (409) e
+//          manda usar "Montar proximo lote", que rele o Sankhya. O `seco` nao e barrado: ele
+//          nao manda nada, e serve justamente para ver o estado.
+//       2. PAGAMENTO PARCIAL. O guarda conferia se o NUFIN EXISTIA e mais nada; num pagamento
+//          parcial o NUFIN fica e so o valor muda, entao o card passava e o cliente recebia o
+//          valor velho. Em 20/10 nenhum card estava nessa situacao (o Sankhya baixa o titulo e
+//          cria outro), mas a checagem sai de graca — a soma ja esta em maos.
+//     Por que recusar em vez de reescrever o card aqui: a pessoa aprovou UM texto, com UM
+//     valor. Trocar o texto depois do OK e aprovar no lugar dela.
 //
 // v6: RODIZIO DE NUMEROS, RITMO PROPRIO E PORTA NO NUMERO DE DESTINO (pedidos de 07/10).
 //     - O WhatsApp sai alternando entre os numeros de `cobranca_config.instancias` (Karla e
@@ -112,6 +132,55 @@ async function empresaGhl(sb: any, id: string): Promise<EmpGhl> {
   const fid = data?.campos && typeof data.campos === "object" && data.campos.codparc ? String(data.campos.codparc) : null;
   return { loc, tok, fidCodparc: fid };
 }
+/** O dia (YYYY-MM-DD) em Sao Paulo. O Deno roda em UTC e depois das 21h o dia de la ja virou. */
+export function diaSp(d: Date): string {
+  const f = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" });
+  return f.format(d);
+}
+
+/**
+ * O ESPELHO TEM IDADE, E O GUARDA DOS NUFINS VALE O QUE O ESPELHO VALE.
+ *
+ * A conferencia logo abaixo compara os NUFINs do card com `cobranca_titulo`. Mas esse espelho
+ * nao se atualiza sozinho: quem o reescreve e o `cobranca-refresh`. Pelo cron os dois passos
+ * correm em serie e a janela e de segundos. Pelo painel, nao: em 20/10 o espelho era de 19/10
+ * as 17:10 e nada em `aprovar` conferia isso — quem pagou NAQUELE DIA seguia "em aberto" aos
+ * olhos do guarda, e o card saia. O guarda parecia existir e nao existia.
+ *
+ * A regra do gestor e "recalcular os vencidos sempre no dia da geracao da cobranca". Aqui ela
+ * vale tambem na APROVACAO, que e o momento em que a mensagem de fato sai.
+ */
+export function espelhoVelho(o: { atualizado: string | null; agora: Date }): { velho: boolean; dia_espelho: string | null; dia_hoje: string } {
+  const dia_hoje = diaSp(o.agora);
+  if (!o.atualizado) return { velho: true, dia_espelho: null, dia_hoje };
+  const dia_espelho = diaSp(new Date(o.atualizado));
+  return { velho: dia_espelho < dia_hoje, dia_espelho, dia_hoje };
+}
+
+/**
+ * O card sai ou nao sai. Duas perguntas, nao uma:
+ *   1. algum NUFIN sumiu do espelho?  pago, baixado ou renegociado
+ *   2. a soma mudou sem nenhum sumir?  pagamento PARCIAL ou renegociacao de valor
+ * A (2) faltava: o guarda conferia existencia e nada mais, entao um titulo parcialmente pago
+ * passava e o cliente recebia o valor velho. Em 20/10 isso nao estava acontecendo em nenhum
+ * card (o Sankhya baixa o titulo e cria outro), mas o custo de errar e mandar numero errado
+ * para o cliente, e a checagem sai de graca: a soma ja esta em maos.
+ * Tolerancia de 1 centavo: `valor` e numeric no banco e float aqui.
+ */
+export function vereditoDoCard(o: { nufins: number[]; valorCard: number; abertos: Map<number, number> }): { sai: boolean; motivo: string | null; baixados: number; valor_atual: number } {
+  const baixados = o.nufins.filter((n) => !o.abertos.has(n));
+  const valor_atual = o.nufins.reduce((s, n) => s + (o.abertos.get(n) ?? 0), 0);
+  if (baixados.length) {
+    return { sai: false, baixados: baixados.length, valor_atual,
+      motivo: `${baixados.length} de ${o.nufins.length} titulo(s) nao estao mais em aberto no Sankhya (pagos, baixados ou renegociados) — nada foi enviado. Monte o proximo lote para refazer o card com a divida atual.` };
+  }
+  if (Math.abs(valor_atual - o.valorCard) > 0.01) {
+    return { sai: false, baixados: 0, valor_atual,
+      motivo: `o valor mudou no Sankhya depois da montagem (card ${o.valorCard.toFixed(2)}, hoje ${valor_atual.toFixed(2)}) — pagamento parcial ou renegociacao. Nada foi enviado; monte o proximo lote.` };
+  }
+  return { sai: true, motivo: null, baixados: 0, valor_atual };
+}
+
 function ghl(g: EmpGhl, method: string, path: string, body?: any, version = "2021-07-28") {
   return fetch(API + path, { method, headers: { Authorization: "Bearer " + g.tok, Version: version, "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA }, body: body ? JSON.stringify(body) : undefined });
 }
@@ -267,25 +336,42 @@ Deno.serve(async (req) => {
        Entre o montar e o aprovar o cliente pode ter pago. No cron os dois passos correm
        seguidos e a janela e de segundos, mas o painel nao: um card de sexta aprovado na
        segunda cobraria quem ja quitou — e cobrar quem pagou custa mais do que nao cobrar.
-       Entao, antes de mandar, os NUFINs do card sao conferidos contra o cobranca_titulo,
-       que o refresh acabou de reescrever a partir do Sankhya. Sumiu algum, o card nao sai:
-       ele volta para 'aguardando' com o motivo, e um novo `cobranca-montar` o reescreve
-       com a divida certa. Recalcular o texto aqui seria pior — a pessoa aprovou UM texto,
-       e trocar o texto depois do OK e aprovar por ela. */
+       Entao, antes de mandar, os NUFINs do card sao conferidos contra o cobranca_titulo.
+       Sumiu algum, ou a soma mudou, o card nao sai: ele volta para 'aguardando' com o motivo,
+       e um novo `cobranca-montar` o reescreve com a divida certa. Recalcular o texto aqui
+       seria pior — a pessoa aprovou UM texto, e trocar o texto depois do OK e aprovar por ela.
+
+       ATENCAO AO QUE ESTE COMENTARIO DIZIA ATE A v7: "o cobranca_titulo, que o refresh acabou
+       de reescrever a partir do Sankhya". Isso e verdade pelo cron e FALSO pelo painel, e a
+       frase escondeu o furo por duas versoes — conferir contra o espelho de ontem nao e
+       conferir. Por isso a idade do espelho e checada ANTES, logo abaixo. */
+    // PRIMEIRO a idade do espelho: sem isso a conferencia abaixo so repete o que o Sankhya
+    // dizia ontem. Espelho de ontem = o guarda nao enxerga quem pagou hoje.
+    const { data: maisNova } = await sb.from("cobranca_titulo")
+      .select("atualizado").order("atualizado", { ascending: false }).limit(1).maybeSingle();
+    const idade = espelhoVelho({ atualizado: maisNova?.atualizado ?? null, agora: new Date() });
+    if (idade.velho && !seco) {
+      return j({
+        ok: false, espelho_velho: true, dia_espelho: idade.dia_espelho, dia_hoje: idade.dia_hoje,
+        erro: `o Sankhya nao foi relido hoje (espelho de ${idade.dia_espelho ?? "nunca"}, hoje e ${idade.dia_hoje}) — nada foi enviado. `
+            + `Aprovar com numero de outro dia cobraria quem pagou desde entao, e a conferencia de titulo baixado nao pegaria. `
+            + `Use "Montar proximo lote" no painel: ele rele o Sankhya e refaz os cards com a divida de hoje.`,
+      }, 409);
+    }
+
     const todosNufins = [...new Set(cards.flatMap((c: any) => (Array.isArray(c.nufins) ? c.nufins : []).map(Number)).filter(Boolean))];
-    const aindaAberto = new Set<number>();
+    const abertos = new Map<number, number>();
     for (let i = 0; i < todosNufins.length; i += 500) {
-      const { data } = await sb.from("cobranca_titulo").select("nufin").in("nufin", todosNufins.slice(i, i + 500));
-      for (const t of (data || [])) aindaAberto.add(Number(t.nufin));
+      const { data } = await sb.from("cobranca_titulo").select("nufin,valor").in("nufin", todosNufins.slice(i, i + 500));
+      for (const t of (data || [])) abertos.set(Number(t.nufin), Number(t.valor) || 0);
     }
 
     for (const card of cards) {
       const nufins = (Array.isArray(card.nufins) ? card.nufins : []).map(Number).filter(Boolean);
-      const baixados = nufins.filter((n: number) => !aindaAberto.has(n));
-      if (baixados.length) {
-        const motivo = `${baixados.length} de ${nufins.length} titulo(s) nao estao mais em aberto no Sankhya (pagos, baixados ou renegociados) \u2014 nada foi enviado. Rode o cobranca-montar para refazer o card com a divida atual.`;
-        if (!seco) await sb.from("cobranca_fila").update({ status: "aguardando", motivo }).eq("id", card.id);
-        resumo.push({ id: card.id, nome: card.nome, resultado: "desatualizado", baixados: baixados.length, de: nufins.length });
+      const v = vereditoDoCard({ nufins, valorCard: Number(card.valor) || 0, abertos });
+      if (!v.sai) {
+        if (!seco) await sb.from("cobranca_fila").update({ status: "aguardando", motivo: v.motivo!.slice(0, 300) }).eq("id", card.id);
+        resumo.push({ id: card.id, nome: card.nome, resultado: "desatualizado", baixados: v.baixados, de: nufins.length, valor_card: Number(card.valor) || 0, valor_atual: v.valor_atual, motivo: v.motivo });
         continue;
       }
       const contatos: any[] = Array.isArray(card.contatos) ? card.contatos : [];
@@ -474,6 +560,10 @@ Deno.serve(async (req) => {
     const conta = (f: (x: any) => boolean) => resumo.filter(f).length;
     return j({
       ok: true, seco, processados: resumo.length,
+      // o dia do espelho vai na resposta sempre: e o que diz contra QUAL retrato do Sankhya a
+      // conferencia de titulo baixado foi feita. No seco ele pode estar velho (o seco nao e
+      // barrado, porque nao manda nada) e o painel precisa poder dizer isso.
+      espelho: idade,
       enfileirados: conta((r) => r.resultado === "enfileirado"),
       erros: conta((r) => r.resultado === "erro"),
       sem_contato: conta((r) => r.resultado === "sem_contato"),
