@@ -1,4 +1,4 @@
-// cobranca-painel (v14) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v15) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
 //
@@ -98,6 +98,15 @@
 //      pula quem foi cobrado nos ultimos `reenvio_min_dias` (entao traz o lote SEGUINTE) e
 //      rele o Sankhya na hora. A espera tem teto de 110s: estourando, a tela diz que a
 //      montagem continua rodando, nao que falhou.
+//
+// v15: O BOTAO DE MONTAR RELE O SANKHYA ANTES (20/10). O cron ja fazia refresh -> montar; o
+//      botao da v14 chamava o montar direto, e e exatamente ali que a diferenca machuca:
+//      quem monta pela tela monta quando quer, quase nunca logo depois do refresh das 02h40.
+//      Em 15/10 havia 120 cards montados em dias anteriores e 44 deles ja tinham pago.
+//      Refresh que falha INTERROMPE a montagem, de proposito.
+//      Na mesma data a cadencia mudou (cobranca ter/qui/sex, lembrete na segunda), e o
+//      titulo da aba do lembrete deixou de dizer "proxima semana" — saindo na segunda, a
+//      janela de 7 dias cai dentro da mesma semana.
 //
 // GET  ?rodada=YYYY-MM-DD&fase=vencido    -> a tela
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
@@ -461,7 +470,7 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 <div class="sub">${esc(ctx.deOndeVem)} · <b>${cards.length} grupo(s) esperando aprovação</b> · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
 ${ctx.atrasados ? `<div class="alerta">${ctx.atrasados} destes grupos foram montados em rodadas anteriores e ninguém decidiu sobre eles —
   o mais antigo tem <b>${ctx.diasDoMaisVelho} dia(s)</b>. Os valores vêm do espelho do Sankhya daquele dia: quem pagou desde então
-  pode estar nesta lista. Se a espera te incomodar, recuse tudo e monte de novo — o <code>cobranca-montar</code> relê os títulos na hora.</div>` : ""}
+  pode estar nesta lista. Se a espera te incomodar, recuse tudo e monte de novo — o botão abaixo relê os títulos na hora.</div>` : ""}
 ${ctx.wppPausado
   ? `<div class="alerta">Nenhum número da cobrança está de pé${ctx.caidas?.length ? " (" + esc(ctx.caidas.join(", ")) + ")" : ""}.
        Aprovando agora, saem <b>${porMail} por e-mail</b>, na hora.
@@ -492,7 +501,7 @@ ${cards.length ? `<div class="atalhos">
 <div id="placar"></div>` : ""}
 <div id="aviso"></div>
 ${saiuResumo}
-${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação — nem hoje, nem nas rodadas dos últimos 30 dias.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) de hoje já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>A próxima rodada é montada sozinha em " + esc(ctx.proximos?.quando || "segunda, quarta ou sexta, 9h") + "."}</div>`}
+${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação — nem hoje, nem nas rodadas dos últimos 30 dias.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) de hoje já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>A próxima rodada é montada sozinha em " + esc(ctx.proximos?.quando || "terça, quinta ou sexta, 9h") + ", ou use o botão abaixo."}</div>`}
 ${bloqueados}
 ${filaDepois(ctx)}
 </div><script>
@@ -781,7 +790,7 @@ a.volta{color:var(--ac);text-decoration:none;font-size:13px}
 <div class="sub">últimos ${d.dias} dias · <a class="volta" href="?fase=vencido${d.sufixo}">aprovação</a> · <a class="volta" href="?aba=conversas${d.sufixo}">conversas</a></div>
 
 <section><h2>As três chaves</h2>
-${chave(d.cfg.ativo, "ativo", "a rodada diária monta e dispara cobrança")}
+${chave(d.cfg.ativo, "ativo", "a rodada monta e dispara cobrança (terça, quinta e sexta)")}
 ${chave(d.cfg.atende, "atende_ativo", "a Nina responde quem escrever de volta")}
 ${chave(d.cfg.emitidos, "emitidos_ativo", "o boleto sai no dia em que é registrado no banco")}
 <p class="nada" style="margin-top:8px">Nenhuma liga as outras. Com as três desligadas o sistema só monta a fila e espera aprovação.</p></section>
@@ -993,7 +1002,7 @@ async function previaProximos(sb: any, cfg: any, cards: any[], fase: string) {
   const rodadas = Math.max(1, Math.ceil((fila.length + cards.length) / Math.max(1, TETO)));
   return {
     grupos: fila.length, valor, teto: TETO, rodadas,
-    quando: fase === "vencido" ? "segunda, quarta ou sexta, 9h" : "sexta, 9h",
+    quando: fase === "vencido" ? "terça, quinta ou sexta, 9h" : "segunda, 9h",
     lista: fila.slice(0, 15),
   };
 }
@@ -1142,19 +1151,18 @@ Deno.serve(async (req) => {
       const b = await req.json().catch(() => ({}));
 
       /* MONTAR O PROXIMO LOTE PELA TELA.
-         Ate aqui so o cron (segunda, quarta e sexta) ou alguem com acesso ao banco podia
-         montar; numa quinta, ou depois de aprovar os 60 do dia, o gestor ficava esperando
-         sem ter o que fazer. Montar nao envia NADA: escreve cards em `aguardando`, que e
-         rascunho. O disparo continua sendo um segundo clique, de proposito.
-         Tres coisas que fazem isto ser seguro de botao:
+         Ate aqui so o cron (cobranca ter/qui/sex, lembrete seg) ou alguem com acesso ao
+         banco podia montar; num dia sem rodada, ou depois de aprovar os 60 do dia, o gestor
+         ficava esperando sem ter o que fazer. Montar nao envia NADA: escreve cards em
+         `aguardando`, que e rascunho. O disparo continua sendo um segundo clique.
+         Duas coisas que fazem isto ser seguro de botao:
            - o montar nunca toca no que ja saiu (enfileirado/aprovado/recusado);
            - ele exclui quem foi cobrado nos ultimos `reenvio_min_dias`, entao rodar depois
-             de aprovar traz o LOTE SEGUINTE, nao o mesmo de novo;
-           - ele rele o Sankhya na hora, entao quem pagou nao entra.
-         O ESPERAR TEM LIMITE. A montagem leva de 1 a 2 minutos (ela fala com o MCP por
-         card) e a funcao que espera tambem tem prazo. Se estourar, a resposta NAO diz que
-         falhou: diz que continua rodando, porque e verdade — e repetir a montagem seria
-         inofensivo de qualquer jeito, ja que a chave e (rodada, fase, grupo). */
+             de aprovar traz o LOTE SEGUINTE, nao o mesmo de novo.
+         O ESPERAR TEM LIMITE. Refresh + montagem levam de 1 a 3 minutos (a montagem fala com
+         o MCP por card) e a funcao que espera tambem tem prazo. Estourando NA MONTAGEM, a
+         resposta nao diz que falhou: diz que continua rodando, porque e verdade — e repetir
+         seria inofensivo, ja que a chave e (rodada, fase, grupo). */
       if (b.acao === "montar") {
         /* RELER O SANKHYA ANTES, SEMPRE. O cron ja fazia refresh -> montar; o botao, nao, e
            essa diferenca e perigosa justamente aqui. Em 15/10 havia 120 cards montados em

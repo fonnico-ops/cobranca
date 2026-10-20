@@ -1,4 +1,4 @@
-// cobranca-montar (v11) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
+// cobranca-montar (v12) — monta a fila do dia: quem cobrar, com que texto, com quais boletos.
 //
 // NAO MANDA NADA. Escreve em cobranca_fila com status 'aguardando' e para. Quem dispara e o
 // cobranca-aprovar, depois do OK no painel (ou direto, quando cobranca_config.auto_aprovar
@@ -46,6 +46,11 @@
 //      sobraram 4, todos com titulo ja pago. O aprovar os recusaria (a conferencia de NUFIN
 //      pega), mas cobranca que nao vai sair nao deveria aparecer para aprovar. O que ja saiu
 //      nao e tocado.
+//
+// v12: o lembrete deixou de dizer "na proxima semana" (20/10). Ele saia na sexta, e a janela
+//      de `dias_a_vencer` (7) caia mesmo na semana seguinte; agora ele sai na SEGUNDA e a
+//      mesma janela cai dentro da semana corrente. "nos proximos dias" e verdade nos dois
+//      casos, e continua verdade se a janela mudar. Vale para a mensagem e para o assunto.
 //
 // POST { fase: "vencido" | "a_vencer", rodada?: "YYYY-MM-DD", limite?: n, seco?: true }
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -556,14 +561,14 @@ Deno.serve(async (req) => {
 
     /* ---- quem pediu para parar NAO entra, nunca ----------------------------------
        O cobranca-atende marca nao_perturbe quando o cliente pede para nao receber mais.
-       Se a rodada de segunda ignorasse isso, o cliente que pediu na sexta seria cobrado de
-       novo tres dias depois — e o caminho mais curto para o numero ser denunciado. Perder
+       Se a rodada seguinte ignorasse isso, o cliente que pediu na sexta seria cobrado de
+       novo na terca — e o caminho mais curto para o numero ser denunciado. Perder
        o numero custa a carteira inteira, nao um cliente. */
     const { data: silencio } = await sb.from("cobranca_conversa").select("grupo").eq("nao_perturbe", true);
     const naoPerturbe = new Set((silencio || []).map((x: any) => String(x.grupo)));
 
     /* ---- o que o cliente JA TEM -------------------------------------------------
-       Só importa no aviso da semana anterior, que virou lembrete: ver textoAVencer().
+       Só importa no lembrete, que desde 20/10 sai na segunda: ver textoAVencer().
        No vencido nao se consulta — la o boleto vai junto de qualquer jeito, porque a
        mensagem existe para ele pagar agora, nao para ele lembrar de uma data. */
     const jaEntregue = new Set<number>();
