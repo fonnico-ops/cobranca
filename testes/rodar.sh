@@ -42,7 +42,7 @@ $ESB fones_puro.ts     --format=esm --outfile=fones_puro.mjs     --log-level=err
 $ESB aprovar_puro.ts   --format=esm --outfile=aprovar_puro.mjs   --log-level=error
 
 falhou=0
-for t in boleto_pdf qr montar boleto_mensagem assinatura marca conversa emitidos saude fase vigia entregas fone ritmo boleto_link casca; do
+for t in boleto_pdf qr montar boleto_mensagem assinatura marca conversa emitidos saude fase vigia entregas fone ritmo boleto_link casca cadencia; do
   printf '%-18s ' "$t"
   if saida=$(node "$t.teste.mjs" 2>&1); then echo "$saida" | tail -1
   else echo "FALHOU"; echo "$saida"; falhou=1; fi

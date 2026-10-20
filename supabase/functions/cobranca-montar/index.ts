@@ -311,7 +311,10 @@ function textoAVencer(ctx: any): string {
   const faltam = Math.max(0, n - (Number(ctx.jaTem) || 0));
   const partes = [
     `Olá, ${nome ? nome + "!" : "tudo bem?"}`, "",
-    `Passando para lembrar ${n === 1 ? "do título que vence" : "dos títulos que vencem"} na próxima semana aqui na ${empresa}:`, "",
+    // "na proxima semana" so era verdade enquanto o lembrete saia na sexta. Desde 20/10 ele
+    // sai na segunda, e a janela (`dias_a_vencer`, 7) passa a cair DENTRO da mesma semana.
+    // "nos proximos dias" e verdade nos dois casos — e continua verdade se a janela mudar.
+    `Passando para lembrar ${n === 1 ? "do título que vence" : "dos títulos que vencem"} nos próximos dias aqui na ${empresa}:`, "",
     linhasTitulos(titulos, multi, nomes, teto), "",
     `Total: *${brl(total)}*`, "",
   ];
@@ -642,7 +645,7 @@ Deno.serve(async (req) => {
       const textoEmail = escreve(TETO_EMAIL);  // e-mail: cabe mais detalhe
       const assunto = fase === "vencido"
         ? `${EMPRESA_NOME} — título${ordenados.length > 1 ? "s" : ""} em aberto (${brl(total)})`
-        : `${EMPRESA_NOME} — vencimento${ordenados.length > 1 ? "s" : ""} da próxima semana (${brl(total)})`;
+        : `${EMPRESA_NOME} — vencimento${ordenados.length > 1 ? "s" : ""} dos próximos dias (${brl(total)})`;
 
       // No lembrete o anexo e so do que o cliente ainda NAO tem. No vencido vai tudo.
       const boletosDoCard = fase === "a_vencer"

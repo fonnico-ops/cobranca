@@ -286,9 +286,10 @@ function filaDepois(ctx: any): string {
     ${p.grupos > (p.lista || []).length ? `<p class="nota">… e mais ${p.grupos - (p.lista || []).length} grupo(s).</p>` : ""}
     <div class="montar">
       <button id="montar">Montar este lote agora (${Math.min(p.teto, p.grupos)} grupos)</button>
-      <span class="nota">Monta as mensagens e <b>não envia nada</b> — elas sobem para a lista de cima,
-        esperando a sua aprovação. Leva 1 a 2 minutos${ctx.temAguardando ? `. Atenção: os ${ctx.temAguardando} card(s)
-        que ainda esperam aprovação são rascunho e serão refeitos com os títulos relidos agora` : ""}.</span>
+      <span class="nota"><b>Relê os vencidos no Sankhya</b> e monta as mensagens — <b>não envia nada</b>.
+        Elas sobem para a lista de cima, esperando a sua aprovação. Leva 1 a 3 minutos${ctx.temAguardando ? `.
+        Atenção: os ${ctx.temAguardando} card(s) que ainda esperam aprovação são rascunho e serão refeitos
+        com os títulos relidos agora` : ""}.</span>
     </div>
   </section>`;
 }
@@ -456,7 +457,7 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .mut{color:var(--mut);font-size:12.5px}
 @media(max-width:560px){.wrap{padding:12px}.card header{flex-wrap:wrap}.vlr{width:100%}}
 </style></head><body><div class="wrap">
-<h1>Cobrança — ${ctx.fase === "vencido" ? "títulos vencidos" : "a vencer na próxima semana"}</h1>
+<h1>Cobrança — ${ctx.fase === "vencido" ? "títulos vencidos" : "a vencer nos próximos dias"}</h1>
 <div class="sub">${esc(ctx.deOndeVem)} · <b>${cards.length} grupo(s) esperando aprovação</b> · ${brl(total)} · sai pela <b>${esc(ctx.instancia)}</b>${ctx.desligado ? ' · <b style="color:#c60">motor desligado (cobranca_config.ativo = false)</b>' : ""}</div>
 ${ctx.atrasados ? `<div class="alerta">${ctx.atrasados} destes grupos foram montados em rodadas anteriores e ninguém decidiu sobre eles —
   o mais antigo tem <b>${ctx.diasDoMaisVelho} dia(s)</b>. Os valores vêm do espelho do Sankhya daquele dia: quem pagou desde então
@@ -573,8 +574,8 @@ $("#recusar").onclick=()=>manda("recusar");
 if($("#montar")) $("#montar").onclick=async()=>{
   if(!confirm("Montar o pr\\u00f3ximo lote?\\n\\nIsto apenas PREPARA as mensagens para a sua aprova\\u00e7\\u00e3o. Nada sai para cliente nenhum agora.")) return;
   const b=$("#montar"); b.disabled=true; const antes=b.textContent;
-  b.textContent="Montando\\u2026 (1 a 2 min)";
-  aviso("Montando o pr\\u00f3ximo lote\\u2026 isso leva 1 a 2 minutos. N\\u00e3o feche a p\\u00e1gina.");
+  b.textContent="Montando\\u2026 (1 a 3 min)";
+  aviso("Relendo os vencidos no Sankhya e montando o pr\\u00f3ximo lote\\u2026 leva 1 a 3 minutos. N\\u00e3o feche a p\\u00e1gina.");
   try{
     const r=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao:"montar",fase:FASE})});
     const d=await r.json();
@@ -1155,18 +1156,37 @@ Deno.serve(async (req) => {
          falhou: diz que continua rodando, porque e verdade — e repetir a montagem seria
          inofensivo de qualquer jeito, ja que a chave e (rodada, fase, grupo). */
       if (b.acao === "montar") {
-        const corpoM = JSON.stringify({ fase: String(b.fase || "vencido") });
-        try {
-          const r = await fetch(Deno.env.get("SUPABASE_URL")! + "/functions/v1/cobranca-montar", {
+        /* RELER O SANKHYA ANTES, SEMPRE. O cron ja fazia refresh -> montar; o botao, nao, e
+           essa diferenca e perigosa justamente aqui. Em 15/10 havia 120 cards montados em
+           dias anteriores e 44 deles JA TINHAM PAGO: montar sobre espelho velho e preparar
+           cobranca para quem nao deve. Quem monta pela tela monta quando quer, e quase nunca
+           logo depois do refresh diario das 02h40 — entao o recalculo vem junto do clique.
+           O refresh tem prazo proprio (60s). Se ele falhar, a montagem NAO acontece: montar
+           com numero velho e pior do que nao montar, e a tela diz isso em vez de inventar
+           um lote. */
+        const chamar = (nome: string, corpo: unknown, ms: number) =>
+          fetch(Deno.env.get("SUPABASE_URL")! + "/functions/v1/" + nome, {
             method: "POST",
             headers: { Authorization: "Bearer " + srvKey(), "Content-Type": "application/json" },
-            body: corpoM,
-            signal: AbortSignal.timeout(110000),
+            body: JSON.stringify(corpo),
+            signal: AbortSignal.timeout(ms),
           });
-          const d = await r.json().catch(() => ({}));
-          return j({ ok: d?.ok !== false, montagem: d }, r.status);
+        let relido: any = null;
+        try {
+          const rf = await chamar("cobranca-refresh", {}, 60000);
+          relido = await rf.json().catch(() => ({}));
+          if (relido?.ok === false) {
+            return j({ ok: false, erro: "o Sankhya nao respondeu ao recalculo dos vencidos: " + String(relido?.erro || "").slice(0, 200) + ". Nada foi montado — montar com numero velho cobraria quem ja pagou." }, 502);
+          }
         } catch (_e) {
-          return j({ ok: true, ainda_rodando: true });
+          return j({ ok: false, erro: "o recalculo dos vencidos passou de 60s e foi abortado. Nada foi montado — tente de novo em um minuto." }, 504);
+        }
+        try {
+          const r = await chamar("cobranca-montar", { fase: String(b.fase || "vencido") }, 110000);
+          const d = await r.json().catch(() => ({}));
+          return j({ ok: d?.ok !== false, montagem: d, relido }, r.status);
+        } catch (_e) {
+          return j({ ok: true, ainda_rodando: true, relido });
         }
       }
 
