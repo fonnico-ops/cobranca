@@ -1,6 +1,24 @@
-// cobranca-painel (v15) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
+// cobranca-painel (v16) — a tela de aprovacao, a das entregas, a das conversas e a da saude. HTML montado no servidor, com a chave de
 // servico ficando no servidor: as tabelas de cobranca tem RLS ligada e sem policy, entao
 // o anon key nao le nada. O navegador so ve o que esta na pagina.
+//
+// v16: BOTAO "REFAZER A ANALISE E A CARGA" (pedido do gestor em 21/10). A razao dele e o que
+//      importa: "as meninas podem nao ter baixado todos os titulos ainda". O Sankhya so sabe
+//      o que o financeiro lancou, entao quem opera precisa poder dizer "agora os lancamentos
+//      entraram, refaz a conta" quantas vezes quiser, sem esperar o cron de ter/qui/sex.
+//      Refazer = reler o Sankhya, descartar o pendente de rodada ANTERIOR, montar de novo.
+//      DUAS DECISOES QUE NAO SAO OBVIAS:
+//        1. Ele descarta so a rodada ANTERIOR, nunca a de hoje. O cobranca-montar monta os
+//           `intocaveis` com enfileirado + aprovado + RECUSADO da rodada e fase que esta
+//           montando; marcar os cards de hoje como recusados os tornaria intocaveis e a nova
+//           carga sairia SEM exatamente os clientes que o gestor quis refazer, em silencio e
+//           com cara de lote pequeno. A rodada de hoje quem resolve e o proprio montar: ele
+//           faz upsert nos escolhidos e apaga os `aguardando` que nao escolheu.
+//        2. O bloco dele aparece SEMPRE, e nao dentro da previa do proximo lote como o botao
+//           de montar. Quando todo mundo elegivel ja tem card pendente a previa fica vazia, o
+//           botao de montar some — e e exatamente ali que refazer e a unica saida.
+//      O descarte vem DEPOIS do refresh: Sankhya mudo deixa a fila velha de pe (ruim) em vez
+//      de deixar o gestor sem fila nenhuma (pior).
 //
 // v2: `?aba=conversas` mostra o que a Nina esta conversando. Sem isso ninguem ve um repasse
 //     acontecer: a Karla recebe a conversa no CRM e o resto do time nao sabe por que, e
@@ -112,7 +130,8 @@
 // GET  ?aba=entregas&dias=2 | ?aba=entregas&rodada=YYYY-MM-DD
 // GET  ?aba=conversas | ?aba=saude&dias=30
 // POST { acao:"aprovar"|"recusar", ids:[...] } -> repassa ao cobranca-aprovar
-// POST { acao:"montar", fase } -> repassa ao cobranca-montar (so prepara; nao envia)
+// POST { acao:"montar", fase }  -> refresh + cobranca-montar (so prepara; nao envia)
+// POST { acao:"refazer", fase } -> refresh + descarta o pendente de rodada anterior + montar
 //
 // O que a tela mostra de proposito, antes do botao:
 //   - a MENSAGEM inteira, como o cliente vai ler. Aprovar sem ler o texto nao e aprovar.
@@ -303,6 +322,41 @@ function filaDepois(ctx: any): string {
   </section>`;
 }
 
+/**
+ * REFAZER A ANALISE E A CARGA, A QUALQUER HORA.
+ *
+ * Pedido do gestor em 21/10, e a razao dele importa: "as meninas podem nao ter baixado todos
+ * os titulos ainda". O Sankhya so sabe o que o financeiro lancou — quem pagou na sexta e so
+ * foi baixado na terca aparece como devedor no meio. Entao quem opera precisa poder dizer
+ * "agora os lancamentos entraram, refaz a conta", quantas vezes quiser, sem esperar o cron.
+ *
+ * ESTE BLOCO APARECE SEMPRE, e isso e de proposito. O botao "Montar este lote agora" vive
+ * dentro da previa do proximo lote, que desaparece quando nao ha proximo lote — e esse e
+ * exatamente o momento em que refazer mais importa: se todo mundo elegivel ja tem card
+ * pendente, a previa fica vazia, o botao de montar some e o gestor fica sem saida, olhando
+ * uma fila velha que ele nao consegue renovar.
+ */
+function blocoRefazer(ctx: any): string {
+  const velhos = Number(ctx.aguardandoVelhos || 0);
+  return `<section class="refazer">
+    <h2>Refazer a análise e a carga</h2>
+    <p class="nota">Relê os títulos no Sankhya <b>agora</b> e monta a carga de novo. Use quando o
+      financeiro acabar de dar as baixas: o que foi pago sai da lista, o que venceu entra, e os
+      valores são recalculados. <b>Não envia nada</b> — a nova carga sobe para a lista de cima
+      esperando a sua aprovação. Pode rodar quantas vezes quiser. Leva 1 a 3 minutos.</p>
+    ${velhos
+      ? `<p class="nota"><b>O que vai ser descartado:</b> ${velhos} card(s) que ainda esperam aprovação
+          foram montados em rodadas anteriores, com os títulos de outro dia. Eles são rascunho e vão
+          sair da tela, com o motivo registrado. Os cards de hoje são reescritos com os números
+          relidos. Nada que já foi disparado é tocado.</p>`
+      : `<p class="nota">Não há card de rodada anterior para descartar: os que estão na tela são de
+          hoje e serão reescritos com os números relidos. Nada que já foi disparado é tocado.</p>`}
+    <div class="montar">
+      <button id="refazer" data-velhos="${velhos}">Refazer agora${velhos ? ` (descarta ${velhos})` : ""}</button>
+    </div>
+  </section>`;
+}
+
 function pagina(todos: any[], ctx: any): string {
   /* A TELA DE APROVACAO MOSTRA SO O QUE FALTA APROVAR.
      Ate 07/10 ela listava a rodada inteira: o que ja tinha saido ficava ali, cinza e sem
@@ -321,6 +375,10 @@ function pagina(todos: any[], ctx: any): string {
   const total = cards.reduce((a, c) => a + Number(c.valor || 0), 0);
   // o aviso do botao de montar precisa saber quantos rascunhos seriam refeitos
   ctx.temAguardando = cards.length;
+  /* Quantos dos pendentes vem de rodada ANTERIOR. Sao exatamente os que o montar nao alcanca
+     (a chave dele e (rodada, fase, grupo)) e, portanto, os unicos que o refazer descarta. O
+     botao diz o numero ANTES do clique: "descarta 60" e uma informacao que muda a decisao. */
+  ctx.aguardandoVelhos = cards.filter((c: any) => String(c.rodada).slice(0, 10) < hojeSp()).length;
 
   /* QUANTO TEMPO ISTO VAI LEVAR, antes de clicar.
      O WhatsApp nao sai de uma vez, e desde 07/10 o ritmo e da COBRANCA e nao do trilho
@@ -448,9 +506,9 @@ button.go{background:var(--ac);border-color:var(--ac);color:#fff}button[disabled
 .ent b{color:var(--mut);font-weight:600}
 .ent .para{overflow-wrap:anywhere}
 .selo{font-size:11.5px;color:#fff;padding:2px 9px;border-radius:99px;white-space:nowrap}
-.depois{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:18px 0}
-.depois h2{font-size:15px;margin:0 0 6px}
-.depois .nota{color:var(--mut);font-size:12.5px;margin:6px 0}
+.depois,.refazer{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin:18px 0}
+.depois h2,.refazer h2{font-size:15px;margin:0 0 6px}
+.depois .nota,.refazer .nota{color:var(--mut);font-size:12.5px;margin:6px 0}
 .depois table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
 .depois th,.depois td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd);overflow-wrap:anywhere}
 .depois th{color:var(--mut);font-weight:600;font-size:12px}
@@ -504,6 +562,7 @@ ${saiuResumo}
 ${cards.length ? cartoes : `<div class="vazio-tudo">Nada esperando aprovação — nem hoje, nem nas rodadas dos últimos 30 dias.${jaSairam.length ? "<br>Os " + jaSairam.length + " grupo(s) de hoje já foram disparados — o acompanhamento está em <a href=\"?aba=entregas${ctx.sufixo}\">Entregas</a>." : "<br>A próxima rodada é montada sozinha em " + esc(ctx.proximos?.quando || "terça, quinta ou sexta, 9h") + ", ou use o botão abaixo."}</div>`}
 ${bloqueados}
 ${filaDepois(ctx)}
+${blocoRefazer(ctx)}
 </div><script>
 const API=${JSON.stringify(ctx.api)};
 const FASE=${JSON.stringify(ctx.fase)};
@@ -579,25 +638,42 @@ async function manda(acao){
 $("#aprovar").onclick=()=>manda("aprovar");
 $("#recusar").onclick=()=>manda("recusar");
 /* Montar escreve rascunho e nao envia nada — por isso o aviso do confirm fala de PREPARAR,
-   e nao de disparar. Quem dispara continua sendo o botao verde, num segundo clique. */
-if($("#montar")) $("#montar").onclick=async()=>{
-  if(!confirm("Montar o pr\\u00f3ximo lote?\\n\\nIsto apenas PREPARA as mensagens para a sua aprova\\u00e7\\u00e3o. Nada sai para cliente nenhum agora.")) return;
-  const b=$("#montar"); b.disabled=true; const antes=b.textContent;
-  b.textContent="Montando\\u2026 (1 a 3 min)";
-  aviso("Relendo os vencidos no Sankhya e montando o pr\\u00f3ximo lote\\u2026 leva 1 a 3 minutos. N\\u00e3o feche a p\\u00e1gina.");
+   e nao de disparar. Quem dispara continua sendo o botao verde, num segundo clique.
+
+   Montar e Refazer percorrem O MESMO caminho no servidor (reler o Sankhya, depois montar) e
+   por isso dividem a funcao aqui: a diferenca e um campo no POST e o texto do confirm. Manter
+   duas copias foi o que deixou o botao de montar sem o refresh por uma versao inteira. */
+async function montagem(acao, b){
+  const velhos=Number(b.dataset.velhos||0);
+  const pergunta = acao==="refazer"
+    ? ("Refazer a an\\u00e1lise e a carga?\\n\\n- os t\\u00edtulos s\\u00e3o relidos no Sankhya agora\\n- "
+       +(velhos? velhos+" card(s) de rodadas anteriores s\\u00e3o descartados" : "nenhum card de rodada anterior ser\\u00e1 descartado")
+       +"\\n- os cards de hoje s\\u00e3o reescritos com os n\\u00fameros novos\\n- nada que j\\u00e1 foi disparado \\u00e9 tocado"
+       +"\\n\\nNada sai para cliente nenhum agora: a carga fica esperando a sua aprova\\u00e7\\u00e3o.")
+    : "Montar o pr\\u00f3ximo lote?\\n\\nIsto apenas PREPARA as mensagens para a sua aprova\\u00e7\\u00e3o. Nada sai para cliente nenhum agora.";
+  if(!confirm(pergunta)) return;
+  b.disabled=true; const antes=b.textContent;
+  b.textContent=(acao==="refazer"?"Refazendo":"Montando")+"\\u2026 (1 a 3 min)";
+  aviso("Relendo os t\\u00edtulos no Sankhya e "+(acao==="refazer"?"refazendo a carga":"montando o pr\\u00f3ximo lote")+"\\u2026 leva 1 a 3 minutos. N\\u00e3o feche a p\\u00e1gina.");
   try{
-    const r=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao:"montar",fase:FASE})});
+    const r=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({acao:acao,fase:FASE})});
     const d=await r.json();
     if(d.ainda_rodando){
-      aviso("A montagem passou do tempo de espera e continua rodando no servidor. Recarregue a p\\u00e1gina em 1 minuto para ver os cards.");
+      aviso("A montagem passou do tempo de espera e continua rodando no servidor"
+        +(d.descartados?" (os "+d.descartados+" card(s) velhos j\\u00e1 foram descartados)":"")
+        +". Recarregue a p\\u00e1gina em 1 minuto para ver os cards.");
       b.disabled=false; b.textContent=antes; return;
     }
     if(!d.ok) throw new Error((d.montagem&&d.montagem.erro)||d.erro||"falhou");
     const m=d.montagem||{};
-    aviso("Pronto: "+(m.gravados||0)+" grupo(s) montados"+(m.com_link?", "+m.com_link+" com link do boleto":"")+". Recarregando\\u2026");
+    aviso("Pronto: "+(m.gravados||0)+" grupo(s) montados"
+      +(d.descartados?", "+d.descartados+" card(s) de rodada anterior descartado(s)":"")
+      +(m.com_link?", "+m.com_link+" com link do boleto":"")+". Recarregando\\u2026");
     setTimeout(()=>location.reload(),1800);
-  }catch(e){aviso("Erro ao montar: "+e.message,true);b.disabled=false;b.textContent=antes;}
-};
+  }catch(e){aviso("Erro ao "+(acao==="refazer"?"refazer":"montar")+": "+e.message,true);b.disabled=false;b.textContent=antes;}
+}
+if($("#montar")) $("#montar").onclick=()=>montagem("montar",$("#montar"));
+if($("#refazer")) $("#refazer").onclick=()=>montagem("refazer",$("#refazer"));
 </script></body></html>`;
 }
 
@@ -1163,7 +1239,31 @@ Deno.serve(async (req) => {
          o MCP por card) e a funcao que espera tambem tem prazo. Estourando NA MONTAGEM, a
          resposta nao diz que falhou: diz que continua rodando, porque e verdade — e repetir
          seria inofensivo, ja que a chave e (rodada, fase, grupo). */
-      if (b.acao === "montar") {
+      /* REFAZER = MONTAR + LIMPAR O QUE O MONTAR NAO ALCANCA.
+         Pedido do gestor em 21/10: "mandar gerar uma nova analise e nova carga, considerando
+         que as meninas podem nao ter baixado todos os titulos ainda". Ou seja: poder refazer
+         a conta QUANDO QUISER, depois que o financeiro terminar de dar baixa, quantas vezes
+         precisar — e nao so no horario do cron.
+
+         A diferenca entre os dois botoes e UMA coisa, e vale escrever por que:
+           - na rodada de HOJE o montar ja se resolve: faz upsert nos escolhidos (reescrevendo
+             o card com os numeros relidos agora) e APAGA os `aguardando` que ele nao escolheu
+             — quem pagou sai da tela sozinho.
+           - o que ele estruturalmente NAO alcanca sao os `aguardando` de rodadas ANTERIORES:
+             a chave dele e (rodada, fase, grupo), e rodada velha nunca entra. Em 21/10 eram
+             60 cards "a vencer" montados em 16/10, 11 deles com titulo ja pago. Sem limpar,
+             o mesmo cliente fica com DOIS cards na tela (o velho e o novo) e aprovar os dois
+             manda a cobranca duas vezes.
+         Entao refazer = reler o Sankhya, recusar o pendente de rodada velha, montar.
+
+         POR QUE "recusado" E NAO DELETE, E SO NA RODADA VELHA: o montar monta a lista de
+         `intocaveis` com enfileirado+aprovado+RECUSADO **da rodada e fase que ele esta
+         montando**. Marcar os cards de HOJE como recusados os tornaria intocaveis, e a nova
+         carga sairia sem exatamente os clientes que o gestor quis refazer — em silencio, com
+         cara de lote pequeno. Rodada anterior tem outra chave, entao nao envenena nada, e
+         `recusado` deixa o rastro de quem foi descartado e por que. `cobradoRecente` conta
+         so enfileirado/aprovado, entao recusar nao tira ninguem da nova carga. */
+      if (b.acao === "montar" || b.acao === "refazer") {
         /* RELER O SANKHYA ANTES, SEMPRE. O cron ja fazia refresh -> montar; o botao, nao, e
            essa diferenca e perigosa justamente aqui. Em 15/10 havia 120 cards montados em
            dias anteriores e 44 deles JA TINHAM PAGO: montar sobre espelho velho e preparar
@@ -1189,12 +1289,32 @@ Deno.serve(async (req) => {
         } catch (_e) {
           return j({ ok: false, erro: "o recalculo dos vencidos passou de 60s e foi abortado. Nada foi montado — tente de novo em um minuto." }, 504);
         }
+
+        const fase = String(b.fase || "vencido");
+        /* A LIMPEZA VEM DEPOIS DO REFRESH, DE PROPOSITO. Se o Sankhya nao responder, os dois
+           `return` acima saem antes daqui e a fila pendente continua intacta — o gestor fica
+           com o lote velho, que e ruim, em vez de ficar sem lote nenhum, que e pior. */
+        let descartados = 0;
+        if (b.acao === "refazer") {
+          const hoje = hojeSp();
+          const { data: limpos, error: eL } = await sb.from("cobranca_fila")
+            .update({
+              status: "recusado",
+              motivo: `descartado no painel para refazer a carga: card de rodada anterior, montado com os titulos de outro dia. O Sankhya foi relido em ${hoje} e a carga foi montada de novo.`.slice(0, 300),
+              aprovado_por: "painel (refazer)", aprovado_em: new Date().toISOString(),
+            })
+            .eq("fase", fase).eq("status", "aguardando").lt("rodada", hoje)
+            .select("id");
+          if (eL) return j({ ok: false, erro: "nao consegui descartar os cards pendentes de rodadas anteriores: " + (eL.message || eL) + ". Nada foi montado." }, 500);
+          descartados = (limpos || []).length;
+        }
+
         try {
-          const r = await chamar("cobranca-montar", { fase: String(b.fase || "vencido") }, 110000);
+          const r = await chamar("cobranca-montar", { fase }, 110000);
           const d = await r.json().catch(() => ({}));
-          return j({ ok: d?.ok !== false, montagem: d, relido }, r.status);
+          return j({ ok: d?.ok !== false, montagem: d, relido, descartados, refez: b.acao === "refazer" }, r.status);
         } catch (_e) {
-          return j({ ok: true, ainda_rodando: true, relido });
+          return j({ ok: true, ainda_rodando: true, relido, descartados, refez: b.acao === "refazer" });
         }
       }
 

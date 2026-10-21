@@ -55,6 +55,9 @@ const srv = http.createServer((req, res) => {
       if (ultimoPost.acao === "montar") {
         return res.end('{"ok":true,"montagem":{"ok":true,"gravados":60,"com_link":52}}');
       }
+      if (ultimoPost.acao === "refazer") {
+        return res.end('{"ok":true,"refez":true,"descartados":4,"montagem":{"ok":true,"gravados":57,"com_link":50}}');
+      }
       res.end('{"ok":true,"enfileirados":1,"whatsapp_retidas":1,"email_enviado":1}');
     });
   }
@@ -132,7 +135,24 @@ ok(!!ultimoPost && ultimoPost.fase === "vencido", "e leva a fase da aba");
 ok(!!ultimoPost && !("ids" in ultimoPost), "o POST de montar NAO leva ids — nao e disparo");
 ok(/60 grupo\(s\) montados/.test(await page.locator("#aviso").innerText()), "o aviso confirma o que foi montado");
 
-console.log("9) nenhum erro de script");
+console.log("9) refazer: rele, descarta o pendente velho e remonta \u2014 sem disparar");
+ok(await page.locator("#refazer").isVisible(), "o botao de refazer aparece");
+ok(/4 card\(s\) que ainda esperam aprova/.test(await page.locator(".refazer").innerText()),
+   "e a tela diz quantos cards de rodada anterior serao descartados (os 4 do fixture)");
+ok(/n.o envia nada/i.test(await page.locator(".refazer").innerText()), "com a promessa de que nada e enviado");
+ultimoPost = null;
+await page.click("#refazer");
+await page.waitForTimeout(700);
+ok(!!ultimoPost && ultimoPost.acao === "refazer", "o POST pede refazer");
+ok(!!ultimoPost && ultimoPost.fase === "vencido", "e leva a fase da aba");
+ok(!!ultimoPost && !("ids" in ultimoPost), "sem ids: refazer nao age sobre cards marcados");
+{
+  const t = await page.locator("#aviso").innerText();
+  ok(/57 grupo\(s\) montados/.test(t), "o aviso conta o que foi montado");
+  ok(/4 card\(s\) de rodada anterior descartado/.test(t), "e quantos foram descartados");
+}
+
+console.log("10) nenhum erro de script");
 ok(erros.length === 0, erros.length ? "erros: " + erros.join(" | ") : "console limpo");
 
 await browser.close(); srv.close();
