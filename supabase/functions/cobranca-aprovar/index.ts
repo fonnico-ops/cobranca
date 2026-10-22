@@ -1,4 +1,7 @@
-// cobranca-aprovar (v7) — aprova os cards da fila e dispara. Tudo pelo GHL, pela cobranca.
+// cobranca-aprovar (v8) — aprova os cards da fila e dispara. Tudo pelo GHL, pela cobranca.
+//
+// v8: O NUMERO DE SAIDA PASSOU A SER UM COMANDO NA MENSAGEM (22/10). Ver `comSwitch()` e o
+//     bloco do WhatsApp: nada de `assignedTo`, nada de emprestimo, nada de devolucao.
 //
 // v7: O GUARDA DE "JA PAGOU" PASSOU A VALER DE VERDADE (pergunta do gestor em 20/10:
 //     "se formos rodar novamente e aparece ainda os que ja foram pagos, iriamos mandar
@@ -54,13 +57,11 @@
 //   Zaptos um PDF e um anexo como qualquer outro. Renomear a coluna mexeria em funcao de
 //   producao sem ganho nenhum.
 //
-// A NINA SO PEGA O CONTATO EMPRESTADO
-//   O numero de saida no WhatsApp e o do `assignedTo` do contato — o campanha-dono ja provou
-//   em 26/08 que `fromNumber` o GHL ignora. Entao, para a cobranca sair pela Nina, a Nina
-//   precisa ser dona do contato na hora do envio. O dono anterior fica gravado em
-//   campanha_dono_emprestado com campanha='cobranca', e o `campanha-dono` com
-//   acao:"devolver", campanha:"cobranca" devolve todo mundo. ANOTA ANTES DE TROCAR: se nao
-//   der para registrar de quem era, nada e trocado — foi o erro de 26/08 que custou 9 contatos.
+// O NUMERO DE SAIDA VEM DO COMANDO, NAO DO DONO DO CONTATO (22/10)
+//   Ate a v7 a cobranca saia pelo numero do `assignedTo` do contato, e por isso esta funcao
+//   TROCAVA o dono antes de enviar — e o envio morria junto quando o CRM recusava a troca.
+//   Agora o numero vai dentro da mensagem, como `#switch:<instancia>` (ver `comSwitch()`).
+//   Nada no CRM e tocado, e por isso tambem nao ha mais o que devolver com o `campanha-dono`.
 //
 // v3: abre a CONVERSA (cobranca_conversa). Era um disparo sem depois: quem respondesse
 //     "manda a 2a via" falava sozinho, e quem nao respondesse nunca mais era lembrado.
@@ -113,6 +114,40 @@ export function forma(bruto: any): { estado: "OK" | "FIXO" | "LIXO"; motivo?: st
   if (d[2] !== "9") return { estado: "FIXO", motivo: "o 3o digito nao e 9: nao e celular", e164: cheio };
   if (/^(\d)\1+$/.test(d.slice(2))) return { estado: "LIXO", motivo: "digito repetido: cadastro furado", e164: cheio };
   return { estado: "OK", e164: cheio };
+}
+
+/**
+ * O COMANDO QUE ESCOLHE O NUMERO DE SAIDA SEM TOCAR NO DONO DO CONTATO.
+ *
+ * Regra do gestor (22/10): "quando [a Nina] for enviar alguma mensagem sem trocar a
+ * propriedade usar esses comandos" — `#switch:Karla`, `#switch:Bianca`. Quem le e consome o
+ * comando e o `fila-processar`, que NAO mora neste repositorio.
+ *
+ * POR QUE ISTO SUBSTITUIU O EMPRESTIMO DE DONO. Ate aqui o numero de saida era escolhido
+ * trocando o `assignedTo` do contato no CRM (o `emprestar()`), porque em 26/08 o
+ * campanha-dono provou que o GHL ignora `fromNumber`. So que o envio ficava CONDICIONADO a
+ * essa troca: `PUT assignedTo` que falhasse zerava o `pronto` e a linha de WhatsApp nunca
+ * era escrita na fila — o card saia so por e-mail, em silencio. Foi o que deixou o lote sem
+ * WhatsApp. Alem do risco, a troca mexe no CRM de quem trabalha nele: o dono real do contato
+ * muda debaixo da pessoa e precisa ser devolvido por um segundo passo que ninguem ve.
+ * Com o comando, o numero de saida e um dado da MENSAGEM. Nada no CRM muda, nao ha o que
+ * devolver, e nenhum envio depende de uma escrita remota dar certo.
+ *
+ * O PREFIXO E A PRIMEIRA LINHA, sozinho. Se o `fila-processar` nao consumir e apagar essa
+ * linha, ela chega ao cliente no topo de uma cobranca — por isso a regra e provar isso com
+ * o `cobranca-teste`, para um numero interno, ANTES de um lote de verdade.
+ *
+ * COPIA PROPOSITAL (tambem no atende, seguir, emitidos e teste): cada Edge Function e um
+ * deploy independente. O `switch.teste.mjs` compara as copias com os mesmos casos.
+ *
+ * Idempotente: card remontado ou reaprovado nao ganha dois prefixos.
+ */
+export function comSwitch(instancia: any, mensagem: any): string {
+  const nome = String(instancia ?? "").trim();
+  const texto = String(mensagem ?? "");
+  if (!nome) return texto;                       // sem instancia, nada a comandar
+  if (/^#switch:/i.test(texto)) return texto;    // ja tem o comando: nao empilha
+  return `#switch:${nome}\n${texto}`;
 }
 
 /* --------------------------------------------------- cadastro da empresa no GHL */
@@ -187,35 +222,17 @@ function ghl(g: EmpGhl, method: string, path: string, body?: any, version = "202
 async function buscarUm(g: EmpGhl, q: string): Promise<any> {
   try { const r = await ghl(g, "GET", `/contacts/?locationId=${g.loc}&query=${encodeURIComponent(q)}&limit=1`); if (!r.ok) return null; const d = await r.json(); return (d?.contacts || [])[0] || null; } catch { return null; }
 }
-async function garantirContato(g: EmpGhl, canal: string, valor: string, nome: string | null, codparc: number, dono?: string) {
+/** Acha ou cria o contato no CRM. Nao mexe em dono: quem escolhe o numero e o `#switch:`. */
+async function garantirContato(g: EmpGhl, canal: string, valor: string, nome: string | null, codparc: number) {
   const buscas = canal === "email" ? [valor] : [e164(valor), digitos(valor)];
-  for (const q of buscas) { const c = await buscarUm(g, q); if (c?.id) return { id: String(c.id), dono_atual: String(c.assignedTo || "") || null, criado: false }; }
+  for (const q of buscas) { const c = await buscarUm(g, q); if (c?.id) return { id: String(c.id), criado: false }; }
   const campos: any = { locationId: g.loc, firstName: nome || (canal === "email" ? valor : "Contato " + e164(valor)) };
   if (canal === "email") campos.email = valor; else campos.phone = e164(valor);
   if (g.fidCodparc && codparc) campos.customFields = [{ id: g.fidCodparc, value: String(codparc) }];
-  if (dono) campos.assignedTo = dono;   // nasce com dono: sem isso o numero de saida fica indefinido
   const r = await ghl(g, "POST", "/contacts/upsert", campos);
   const d = await r.json().catch(() => ({}));
   const id = d?.contact?.id ? String(d.contact.id) : null;
-  return id ? { id, dono_atual: dono || null, criado: true } : null;
-}
-
-/* ------------------------------------------------------------- empréstimo do dono */
-/** Poe o contato com a Nina, anotando antes de quem era. Devolve se conseguiu. */
-async function emprestar(sb: any, g: EmpGhl, contactId: string, donoAtual: string | null, donoNovo: string, fone: string): Promise<{ ok: boolean; motivo?: string; trocado: boolean }> {
-  if (donoAtual === donoNovo) return { ok: true, trocado: false };
-  const { error } = await sb.from("campanha_dono_emprestado").upsert(
-    { contact_id: contactId, fone, dono_antes: donoAtual, dono_depois: donoNovo, campanha: "cobranca" },
-    { onConflict: "contact_id,campanha", ignoreDuplicates: false },
-  );
-  // sem registro nao se troca: devolver viraria adivinhacao
-  if (error) return { ok: false, trocado: false, motivo: "nao consegui registrar o dono anterior, nada foi trocado: " + (error.message || error) };
-  const r = await ghl(g, "PUT", `/contacts/${contactId}`, { assignedTo: donoNovo });
-  if (!r.ok) {
-    await sb.from("campanha_dono_emprestado").delete().eq("contact_id", contactId).eq("campanha", "cobranca").is("devolvido_em", null);
-    return { ok: false, trocado: false, motivo: "PUT assignedTo " + r.status };
-  }
-  return { ok: true, trocado: true };
+  return id ? { id, criado: true } : null;
 }
 
 /* --------------------------------------------------------------- e-mail com anexo */
@@ -255,7 +272,6 @@ Deno.serve(async (req) => {
     if (!cfg?.ativo && !seco) return j({ ok: false, erro: "cobranca_config.ativo = false — o motor esta desligado", desligado: true }, 409);
     const CANAIS: string[] = (cfg?.canais?.length ? cfg.canais : ["whatsapp", "email"]).map(String);
     const NOME_INST = String(cfg?.instancia || "Nina");
-    const FORCAR = cfg?.forcar_instancia !== false;
 
     // recusar: marca e sai, sem tocar no CRM
     if (Array.isArray(b.recusar) && b.recusar.length) {
@@ -281,8 +297,8 @@ Deno.serve(async (req) => {
        "Nina Financeiro" 12 dias fora depois de 25/09 — e, alem do risco, quem responde a
        cobranca cai no WhatsApp de quem TEM alcada para prazo e desconto, que a Nina nao tem.
        `instancias` manda; sem ela, o campo antigo `instancia` continua valendo.
-       A pausada e PULADA, nao substituida: o numero de saida e o do dono do contato no CRM,
-       e o rodizio funciona emprestando o contato para a usuaria da vez. */
+       A pausada e PULADA, nao substituida. Desde 22/10 o rodizio nao empresta mais o contato:
+       o numero da vez vai no texto, como `#switch:<instancia>` (ver `comSwitch`). */
     const RODIZIO: string[] = Array.isArray(cfg?.instancias) && cfg.instancias.length
       ? cfg.instancias.map(String) : [NOME_INST];
     const { data: instRows } = await sb.from("instancia_ghl")
@@ -429,47 +445,42 @@ Deno.serve(async (req) => {
       // e onde o cliente responde, e e la que a Nina consegue atender.
       let conversa: { contact_id: string; canal: string; destino: string } | null = null;
 
-      /* ---------- WhatsApp: escolhe o numero da vez, empresta o contato e RETEM ---------- */
+      /* ---------- WhatsApp: escolhe o numero da vez pelo COMANDO e RETEM ----------------
+         O dono do contato NAO e mais tocado (ver `comSwitch` la em cima): o numero de saida
+         vai no proprio texto, como `#switch:<instancia>`. Some daqui todo o caminho do
+         emprestimo — inclusive a condicao que segurava o envio quando o CRM recusava a troca. */
       if (alvoWpp) {
         // o rodizio: o proximo numero de pe. `vez` so avanca quando um card de fato vai por
         // WhatsApp — senao um grupo sem numero valido "gastaria" a vez e o rodizio desequilibraria.
         const quem = dePe[vez % dePe.length];
-        const donoDaVez = String(cadastro[quem].usuario_ghl_id);
-        const ct = await garantirContato(g, "whatsapp", alvoWpp.valor, alvoWpp.nome, card.grupo, FORCAR ? donoDaVez : undefined);
+        // o contato nasce SEM dono: quem decide o numero e o comando, e atribuir dono aqui
+        // seria mexer no CRM de quem trabalha nele sem nenhum ganho.
+        const ct = await garantirContato(g, "whatsapp", alvoWpp.valor, alvoWpp.nome, card.grupo);
         if (!ct) {
           envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo: "nao consegui achar/criar o contato no CRM", em: new Date().toISOString() });
         } else {
-          let pronto = true; let motivo: string | undefined;
-          if (FORCAR && !ct.criado) {
-            const emp = await emprestar(sb, g, ct.id, ct.dono_atual, donoDaVez, alvoWpp.valor);
-            if (!emp.ok) { pronto = false; motivo = emp.motivo; }
-          }
-          if (!pronto) {
-            envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo, em: new Date().toISOString() });
-          } else {
-            const { data: linha, error: eF } = await sb.from("fila_envio").insert({
-              codparc: card.grupo, contact_id: ct.id, canal: "whatsapp",
-              fone: alvoWpp.valor, nome: alvoWpp.nome || card.nome,
-              mensagem: card.mensagem, instancia: quem,
-              campanha: "cobranca_" + card.fase, publico: "cliente", empresa: empId,
-              // `imagens` e o campo que o fila-processar repassa como `attachments` do GHL:
-              // para o Zaptos, o PDF do boleto e anexo igual a qualquer outro.
-              imagens: urls.length ? urls : null,
-              /* RETIDA, nao pendente. O fila-processar so olha 'pendente'/'agendado', entao
-                 esta linha nao sai sozinha: quem solta e o cobranca-liberar, uma por numero a
-                 cada 2 minutos (pedido do gestor em 07/10). Duas consequencias boas:
-                 o ritmo nao depende do fila_config, que e compartilhado com as outras
-                 campanhas; e uma queda de numero nao vira avalanche na volta — o que ficou
-                 retido escoa no mesmo ritmo, e nao de uma vez. */
-              status: "segurado",
-            }).select("id").maybeSingle();
-            if (eF) envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo: "fila_envio: " + eF.message, em: new Date().toISOString() });
-            else {
-              vez++;
-              if (linha?.id) filaIds.push(Number(linha.id));
-              conversa = { contact_id: ct.id, canal: "whatsapp", destino: alvoWpp.valor };
-              envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: true, fila_id: linha?.id ?? null, anexos: urls.length, instancia: quem, em: new Date().toISOString() });
-            }
+          const { data: linha, error: eF } = await sb.from("fila_envio").insert({
+            codparc: card.grupo, contact_id: ct.id, canal: "whatsapp",
+            fone: alvoWpp.valor, nome: alvoWpp.nome || card.nome,
+            mensagem: comSwitch(quem, card.mensagem), instancia: quem,
+            campanha: "cobranca_" + card.fase, publico: "cliente", empresa: empId,
+            // `imagens` e o campo que o fila-processar repassa como `attachments` do GHL:
+            // para o Zaptos, o PDF do boleto e anexo igual a qualquer outro.
+            imagens: urls.length ? urls : null,
+            /* RETIDA, nao pendente. O fila-processar so olha 'pendente'/'agendado', entao
+               esta linha nao sai sozinha: quem solta e o cobranca-liberar, uma por numero a
+               cada 2 minutos (pedido do gestor em 07/10). Duas consequencias boas:
+               o ritmo nao depende do fila_config, que e compartilhado com as outras
+               campanhas; e uma queda de numero nao vira avalanche na volta — o que ficou
+               retido escoa no mesmo ritmo, e nao de uma vez. */
+            status: "segurado",
+          }).select("id").maybeSingle();
+          if (eF) envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: false, motivo: "fila_envio: " + eF.message, em: new Date().toISOString() });
+          else {
+            vez++;
+            if (linha?.id) filaIds.push(Number(linha.id));
+            conversa = { contact_id: ct.id, canal: "whatsapp", destino: alvoWpp.valor };
+            envios.push({ canal: "whatsapp", destino: alvoWpp.valor, origem: alvoWpp.origem, ok: true, fila_id: linha?.id ?? null, anexos: urls.length, instancia: quem, em: new Date().toISOString() });
           }
         }
       }
@@ -579,7 +590,9 @@ Deno.serve(async (req) => {
       numeros_recusados_antes_de_enviar: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.canal === "whatsapp" && !e.ok && /recusado antes de enviar/.test(String(e.motivo || ""))).length, 0),
       rodizio: dePe, numeros_fora_do_ar: caidas.length ? caidas : undefined,
       por_numero: dePe.map((n) => ({ instancia: n, mensagens: resumo.reduce((a, r) => a + (r.envios || []).filter((e: any) => e.instancia === n && e.ok).length, 0) })),
-      lembrete: "os contatos emprestados voltam com: campanha-dono { acao:'devolver', campanha:'cobranca' }",
+      // o numero de saida foi pedido no texto (`#switch:<instancia>`), e nao trocando o dono do
+      // contato — entao nao ha contato emprestado para devolver depois desta rodada.
+      saida_por: "comando #switch na mensagem (o dono do contato no CRM nao foi tocado)",
       itens: resumo,
     });
   } catch (e) { return j({ ok: false, erro: detalhar(e) }, 500); }

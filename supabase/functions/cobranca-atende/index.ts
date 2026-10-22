@@ -349,6 +349,27 @@ async function numeroDaVez(sb: any, cfg: any, contactId: string): Promise<{ inst
   return { instancia: ordenado[Math.floor(Math.random() * ordenado.length)] };
 }
 
+/**
+ * O COMANDO QUE ESCOLHE O NUMERO DE SAIDA SEM TOCAR NO DONO DO CONTATO.
+ *
+ * Regra do gestor (22/10): mensagem automatica que sai pelo numero das meninas leva
+ * `#switch:<instancia>` na primeira linha, e o proprietario do contato no CRM NAO e mexido.
+ * Quem le e consome o comando e o `fila-processar`, que nao mora neste repositorio.
+ *
+ * COPIA PROPOSITAL do cobranca-aprovar: cada Edge Function e um deploy independente, e um
+ * import comum obrigaria a redeployar todas juntas. O teste `switch.teste.mjs` compara as
+ * copias com os mesmos casos — se divergirem, ele acusa.
+ *
+ * Idempotente: mensagem que ja comeca com o comando nao ganha um segundo.
+ */
+export function comSwitch(instancia: any, mensagem: any): string {
+  const nome = String(instancia ?? "").trim();
+  const texto = String(mensagem ?? "");
+  if (!nome) return texto;
+  if (/^#switch:/i.test(texto)) return texto;
+  return `#switch:${nome}\n${texto}`;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
@@ -531,7 +552,7 @@ Deno.serve(async (req) => {
         } else {
           const { data: linha, error: eF } = await sb.from("fila_envio").insert({
             codparc: conversa.grupo, contact_id: conversa.contact_id, canal: "whatsapp",
-            fone: conversa.destino, nome: conversa.nome, mensagem: texto,
+            fone: conversa.destino, nome: conversa.nome, mensagem: comSwitch(vez.instancia, texto),
             instancia: vez.instancia, campanha: "cobranca_resposta", publico: "cliente", empresa: empId,
             // 'segurado' como todo WhatsApp da cobranca, mas o cobranca-liberar solta RESPOSTA
             // antes de toque: quem escreveu esta esperando, e quem so esta sendo cobrado nao.

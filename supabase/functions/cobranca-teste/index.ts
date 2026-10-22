@@ -74,24 +74,43 @@ async function buscarUm(g: EmpGhl, q: string): Promise<any> {
   try { const r = await ghl(g, "GET", `/contacts/?locationId=${g.loc}&query=${encodeURIComponent(q)}&limit=1`); if (!r.ok) return null; const d = await r.json(); return (d?.contacts || [])[0] || null; } catch { return null; }
 }
 /** O contato DO TESTE. Nasce com a Nina como dona: no WhatsApp o numero de saida e o do dono. */
-async function contatoDeTeste(g: EmpGhl, canal: string, valor: string, nina: string) {
+async function contatoDeTeste(g: EmpGhl, canal: string, valor: string) {
   const buscas = canal === "email" ? [valor] : [e164(valor), digitos(valor)];
   for (const q of buscas) {
     const c = await buscarUm(g, q);
     if (c?.id) {
-      // ja existe (provavelmente e voce mesmo no CRM): so garante a Nina como dona
-      if (canal !== "email" && String(c.assignedTo || "") !== nina) {
-        await ghl(g, "PUT", `/contacts/${c.id}`, { assignedTo: nina });
-      }
+      // o dono do contato NAO e mexido: desde 22/10 quem escolhe o numero de saida e o
+      // comando `#switch:` na mensagem, e este teste existe justamente para provar isso.
       return { id: String(c.id), criado: false };
     }
   }
   const campos: any = { locationId: g.loc, firstName: "TESTE Cobranca" };
-  if (canal === "email") campos.email = valor; else { campos.phone = e164(valor); campos.assignedTo = nina; }
+  if (canal === "email") campos.email = valor; else campos.phone = e164(valor);
   const r = await ghl(g, "POST", "/contacts/upsert", campos);
   const d = await r.json().catch(() => ({}));
   const id = d?.contact?.id ? String(d.contact.id) : null;
   return id ? { id, criado: true } : null;
+}
+
+/**
+ * O COMANDO QUE ESCOLHE O NUMERO DE SAIDA SEM TOCAR NO DONO DO CONTATO.
+ *
+ * Regra do gestor (22/10): mensagem automatica que sai pelo numero das meninas leva
+ * `#switch:<instancia>` na primeira linha, e o proprietario do contato no CRM NAO e mexido.
+ * Quem le e consome o comando e o `fila-processar`, que nao mora neste repositorio.
+ *
+ * COPIA PROPOSITAL do cobranca-aprovar: cada Edge Function e um deploy independente, e um
+ * import comum obrigaria a redeployar todas juntas. O teste `switch.teste.mjs` compara as
+ * copias com os mesmos casos — se divergirem, ele acusa.
+ *
+ * Idempotente: mensagem que ja comeca com o comando nao ganha um segundo.
+ */
+export function comSwitch(instancia: any, mensagem: any): string {
+  const nome = String(instancia ?? "").trim();
+  const texto = String(mensagem ?? "");
+  if (!nome) return texto;
+  if (/^#switch:/i.test(texto)) return texto;
+  return `#switch:${nome}\n${texto}`;
 }
 
 Deno.serve(async (req) => {
@@ -184,19 +203,18 @@ Deno.serve(async (req) => {
 
     const { data: inst } = await sb.from("instancia_ghl").select("usuario_ghl_id,ativa,pausada_em").eq("instancia", NOME_INST).eq("empresa", empId).maybeSingle();
     if (!inst?.usuario_ghl_id) return j({ ok: false, erro: `instancia "${NOME_INST}" sem usuario_ghl_id em instancia_ghl` }, 400);
-    const nina = String(inst.usuario_ghl_id);
 
     const g = await empresaGhl(sb, empId);
     const feito: any[] = [];
 
     /* ---- WhatsApp: pelo trilho de verdade, para provar tambem o trilho ---- */
     if (wpp) {
-      const ct = await contatoDeTeste(g, "whatsapp", wpp, nina);
+      const ct = await contatoDeTeste(g, "whatsapp", wpp);
       if (!ct) feito.push({ canal: "whatsapp", ok: false, motivo: "nao consegui achar/criar o contato de teste no CRM" });
       else {
         const { data: linha, error: eF } = await sb.from("fila_envio").insert({
           codparc: card.grupo, contact_id: ct.id, canal: "whatsapp",
-          fone: wpp, nome: "TESTE Cobranca", mensagem: card.mensagem,
+          fone: wpp, nome: "TESTE Cobranca", mensagem: comSwitch(NOME_INST, card.mensagem),
           instancia: NOME_INST, campanha: "cobranca_TESTE", publico: "interno", empresa: empId,
           imagens: urls.length ? urls : null, status: "pendente",
         }).select("id").maybeSingle();
@@ -209,7 +227,7 @@ Deno.serve(async (req) => {
 
     /* ---- E-mail: daqui, com os PDFs anexos (mesmo caminho do cobranca-aprovar) ---- */
     if (email) {
-      const ct = await contatoDeTeste(g, "email", email, nina);
+      const ct = await contatoDeTeste(g, "email", email);
       if (!ct) feito.push({ canal: "email", ok: false, motivo: "nao consegui achar/criar o contato de teste no CRM" });
       else {
         const payload: any = { type: "Email", contactId: ct.id, subject: card.assunto || "Nitron", html: card.corpo_email || card.mensagem };

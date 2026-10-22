@@ -151,34 +151,40 @@ function ghl(g: EmpGhl, method: string, path: string, body?: any, version = "202
 async function buscarUm(g: EmpGhl, q: string): Promise<any> {
   try { const r = await ghl(g, "GET", `/contacts/?locationId=${g.loc}&query=${encodeURIComponent(q)}&limit=1`); if (!r.ok) return null; const d = await r.json(); return (d?.contacts || [])[0] || null; } catch { return null; }
 }
-async function garantirContato(g: EmpGhl, canal: string, valor: string, nome: string | null, codparc: number, dono?: string) {
+/** Acha ou cria o contato no CRM. Nao mexe em dono: quem escolhe o numero e o `#switch:`. */
+async function garantirContato(g: EmpGhl, canal: string, valor: string, nome: string | null, codparc: number) {
   const buscas = canal === "email" ? [valor] : [e164(valor), digitos(valor)];
-  for (const q of buscas) { const c = await buscarUm(g, q); if (c?.id) return { id: String(c.id), dono_atual: String(c.assignedTo || "") || null, criado: false }; }
+  for (const q of buscas) { const c = await buscarUm(g, q); if (c?.id) return { id: String(c.id), criado: false }; }
   const campos: any = { locationId: g.loc, firstName: nome || (canal === "email" ? valor : "Contato " + e164(valor)) };
   if (canal === "email") campos.email = valor; else campos.phone = e164(valor);
   if (g.fidCodparc && codparc) campos.customFields = [{ id: g.fidCodparc, value: String(codparc) }];
-  if (dono) campos.assignedTo = dono;
   const r = await ghl(g, "POST", "/contacts/upsert", campos);
   const d = await r.json().catch(() => ({}));
   const id = d?.contact?.id ? String(d.contact.id) : null;
-  return id ? { id, dono_atual: dono || null, criado: true } : null;
+  return id ? { id, criado: true } : null;
 }
-/** Igual ao cobranca-aprovar: anota de quem era ANTES de trocar, senao nao troca. */
-async function emprestar(sb: any, g: EmpGhl, contactId: string, donoAtual: string | null, nina: string, fone: string) {
-  if (donoAtual === nina) return { ok: true };
-  const { error } = await sb.from("campanha_dono_emprestado").upsert(
-    { contact_id: contactId, fone, dono_antes: donoAtual, dono_depois: nina, campanha: "cobranca" },
-    { onConflict: "contact_id,campanha", ignoreDuplicates: false });
-  if (error) return { ok: false, motivo: "nao consegui registrar o dono anterior, nada foi trocado" };
-  const r = await ghl(g, "PUT", `/contacts/${contactId}`, { assignedTo: nina });
-  if (!r.ok) {
-    await sb.from("campanha_dono_emprestado").delete().eq("contact_id", contactId).eq("campanha", "cobranca").is("devolvido_em", null);
-    return { ok: false, motivo: "PUT assignedTo " + r.status };
-  }
-  return { ok: true };
+/* ===================================================================== o corpo */
+/**
+ * O COMANDO QUE ESCOLHE O NUMERO DE SAIDA SEM TOCAR NO DONO DO CONTATO.
+ *
+ * Regra do gestor (22/10): mensagem automatica que sai pelo numero das meninas leva
+ * `#switch:<instancia>` na primeira linha, e o proprietario do contato no CRM NAO e mexido.
+ * Quem le e consome o comando e o `fila-processar`, que nao mora neste repositorio.
+ *
+ * COPIA PROPOSITAL do cobranca-aprovar: cada Edge Function e um deploy independente, e um
+ * import comum obrigaria a redeployar todas juntas. O teste `switch.teste.mjs` compara as
+ * copias com os mesmos casos — se divergirem, ele acusa.
+ *
+ * Idempotente: mensagem que ja comeca com o comando nao ganha um segundo.
+ */
+export function comSwitch(instancia: any, mensagem: any): string {
+  const nome = String(instancia ?? "").trim();
+  const texto = String(mensagem ?? "");
+  if (!nome) return texto;
+  if (/^#switch:/i.test(texto)) return texto;
+  return `#switch:${nome}\n${texto}`;
 }
 
-/* ===================================================================== o corpo */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
@@ -198,7 +204,6 @@ Deno.serve(async (req) => {
     const EMPRESA = String(cfg?.empresa_nome || "Nitron");
     const ASSIN = cfg?.assinatura || {};
     const NOME_INST = String(cfg?.instancia || "Nina Financeiro");
-    const FORCAR = cfg?.forcar_instancia !== false;
 
     /* ---- o que NASCEU ha pouco, tem boleto, e ainda nao foi entregue -----------------
        `dt_impressao >= hoje - janela`: e o que faz a mensagem ser verdade. Ver o cabecalho.
@@ -270,7 +275,6 @@ Deno.serve(async (req) => {
     const { data: inst } = await sb.from("instancia_ghl").select("usuario_ghl_id,ativa,pausada_em").eq("instancia", NOME_INST).eq("empresa", empId).maybeSingle();
     if (!inst?.usuario_ghl_id) return j({ ok: false, erro: `instancia "${NOME_INST}" sem usuario_ghl_id em instancia_ghl` }, 400);
     if (inst.pausada_em && !dry) return j({ ok: false, erro: `instancia "${NOME_INST}" pausada desde ${inst.pausada_em} — nada foi enviado`, pausada: true }, 409);
-    const nina = String(inst.usuario_ghl_id);
     const g = dry ? null as any : await empresaGhl(sb, empId);
 
     const itens: any[] = [];
@@ -319,22 +323,20 @@ Deno.serve(async (req) => {
       let contatoConversa: { id: string; canal: string; destino: string } | null = null;
 
       if (alvoWpp) {
-        const ct = await garantirContato(g, "whatsapp", alvoWpp.valor, alvoWpp.nome, Number(grupo), FORCAR ? nina : undefined);
+        // sem dono: o numero de saida vai no texto (`#switch:`), e o CRM nao e tocado. Antes
+        // daqui o envio era CONDICIONADO a trocar o dono — troca recusada pelo CRM matava o
+        // WhatsApp e o boleto saia so por e-mail, em silencio.
+        const ct = await garantirContato(g, "whatsapp", alvoWpp.valor, alvoWpp.nome, Number(grupo));
         if (!ct) envios.push({ canal: "whatsapp", ok: false, motivo: "contato" });
         else {
-          let pronto = true;
-          if (FORCAR && !ct.criado) { const emp = await emprestar(sb, g, ct.id, ct.dono_atual, nina, alvoWpp.valor); pronto = emp.ok; }
-          if (!pronto) envios.push({ canal: "whatsapp", ok: false, motivo: "emprestimo do dono" });
-          else {
-            const { data: linha, error: eF } = await sb.from("fila_envio").insert({
-              codparc: Number(grupo), contact_id: ct.id, canal: "whatsapp",
-              fone: alvoWpp.valor, nome: alvoWpp.nome || ord[0]?.sacado, mensagem: texto,
-              instancia: NOME_INST, campanha: "boleto_emitido", publico: "cliente", empresa: empId,
-              imagens: urls.length ? urls : null, status: "pendente",
-            }).select("id").maybeSingle();
-            if (eF) envios.push({ canal: "whatsapp", ok: false, motivo: eF.message });
-            else { contatoConversa = { id: ct.id, canal: "whatsapp", destino: alvoWpp.valor }; envios.push({ canal: "whatsapp", ok: true, fila_id: linha?.id ?? null, destino: alvoWpp.valor }); }
-          }
+          const { data: linha, error: eF } = await sb.from("fila_envio").insert({
+            codparc: Number(grupo), contact_id: ct.id, canal: "whatsapp",
+            fone: alvoWpp.valor, nome: alvoWpp.nome || ord[0]?.sacado, mensagem: comSwitch(NOME_INST, texto),
+            instancia: NOME_INST, campanha: "boleto_emitido", publico: "cliente", empresa: empId,
+            imagens: urls.length ? urls : null, status: "pendente",
+          }).select("id").maybeSingle();
+          if (eF) envios.push({ canal: "whatsapp", ok: false, motivo: eF.message });
+          else { contatoConversa = { id: ct.id, canal: "whatsapp", destino: alvoWpp.valor }; envios.push({ canal: "whatsapp", ok: true, fila_id: linha?.id ?? null, destino: alvoWpp.valor }); }
         }
       }
 
